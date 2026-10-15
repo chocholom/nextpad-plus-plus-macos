@@ -805,7 +805,7 @@ static sptr_t _srSciColor(NSColor *c) {
 - (void)_unfoldAll:(id)sender { [self unfoldAll]; }
 
 - (void)_copyLines:(id)sender {
-    // Copy only visible result lines WITH line numbers (exactly as shown)
+    // Copy source text, excluding generated result metadata.
     sptr_t selStart = [_sci message:SCI_GETSELECTIONSTART];
     sptr_t selEnd   = [_sci message:SCI_GETSELECTIONEND];
     sptr_t lineStart = [_sci message:SCI_LINEFROMPOSITION wParam:(uptr_t)selStart];
@@ -816,10 +816,11 @@ static sptr_t _srSciColor(NSColor *c) {
         NSString *lineText = [self _visibleLineText:line];
         if (!lineText) continue;
 
-        // Include result lines (tab-prefixed) with their line numbers
-        if ([lineText hasPrefix:@"\t"]) {
-            // Remove leading tab, keep "Line NNN: content"
-            [result appendFormat:@"%@\n", [lineText substringFromIndex:1]];
+        // Only actual result rows carry a source line number.
+        if ((size_t)line < _lineInfos.size() && _lineInfos[line].lineNumber > 0) {
+            NSString *prefix = [NSString stringWithFormat:@"\tLine %6d: ", _lineInfos[line].lineNumber];
+            if ([lineText hasPrefix:prefix])
+                [result appendFormat:@"%@\n", [lineText substringFromIndex:prefix.length]];
         }
     }
 
