@@ -2985,7 +2985,7 @@ static NSDictionary<NSString *, NSString *> *_tahoeButtonDisplayNames(void) {
     [TahoeToolbarConfig setDefaultBuiltinGroups:_tahoeDefaultBuiltinGroupDicts()];
     [TahoeToolbarConfig setButtonDisplayNames:_tahoeButtonDisplayNames()];
 
-    NSArray<NSDictionary *> *model = [TahoeToolbarConfig load];
+    NSArray<NSDictionary *> *model = [TahoeToolbarConfig loadConfiguration];
     if (!model) {
         // First Tahoe use (or after Reset): defaults + current plugins, persisted.
         NSMutableArray *m = [_tahoeDefaultBuiltinGroupDicts() mutableCopy];
