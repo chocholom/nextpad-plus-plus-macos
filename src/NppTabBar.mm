@@ -128,9 +128,16 @@ static NSImage *toolbarIcon(NSString *name) {
 // ─────────────────────────────────────────────────────────────────────────────
 #pragma mark - _NppTabItem (private)
 
+@class _NppTabItem;
+@interface _NppTabCloseAccessibility : NSAccessibilityElement
+@property (nonatomic, weak) _NppTabItem *tab;
+@end
+
 @interface _NppTabItem : NSView {
     BOOL _hovered;
     BOOL _closeHovered;
+    _NppTabCloseAccessibility *_accessibleClose;
+
     NSTrackingArea *_trackingArea;
 }
 @property (nonatomic) NSInteger tabIndex;
@@ -146,7 +153,38 @@ static NSImage *toolbarIcon(NSString *name) {
 - (CGFloat)preferredWidth;
 @end
 
+@implementation _NppTabCloseAccessibility
+- (BOOL)accessibilityPerformPress {
+    if (!self.tab.superview) return NO;
+    [(NppTabBar *)self.tab.target tabItemClosed:self.tab];
+    return YES;
+}
+@end
+
 @implementation _NppTabItem
+
+- (BOOL)isAccessibilityElement { return YES; }
+- (NSString *)accessibilityRole { return NSAccessibilityRadioButtonRole; }
+- (NSString *)accessibilityLabel { return self.title ?: @""; }
+- (id)accessibilityValue { return @(self.isSelected); }
+- (NSString *)accessibilityHelp {
+    return [NSString stringWithFormat:@"%@%@%@ %ld", self.isModified ? [[NppLocalizer shared] translate:@"Edited"] : @"",
+        self.isPinned ? [[NppLocalizer shared] translate:@" Pinned"] : @"", [[NppLocalizer shared] translate:@" Tab"], (long)self.tabIndex+1];
+}
+- (BOOL)accessibilityPerformPress {
+    if (!self.superview) return NO;
+    [(NppTabBar *)self.target tabItemSelected:self]; return YES;
+}
+- (NSArray *)accessibilityChildren {
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:kPrefTabCloseButton]) return @[];
+    if (!_accessibleClose) { _accessibleClose=[_NppTabCloseAccessibility new]; _accessibleClose.tab=self; }
+    _accessibleClose.accessibilityRole=NSAccessibilityButtonRole;
+    _accessibleClose.accessibilityLabel=[NSString stringWithFormat:@"%@ %@", [[NppLocalizer shared] translate:@"Close tab"],self.title ?: @""];
+    _accessibleClose.accessibilityParent=self;
+    NSRect frame=NSMakeRect(MAX(0,self.bounds.size.width-kCloseSize-6),0,kCloseSize,self.bounds.size.height);
+    _accessibleClose.accessibilityFrame=NSAccessibilityFrameInView(self,frame);
+    return @[_accessibleClose];
+}
 
 - (instancetype)initWithFrame:(NSRect)frame {
     self = [super initWithFrame:frame];
@@ -491,6 +529,11 @@ static CGFloat tabShrinkFloor(_NppTabItem *item) {
     NSInteger                      _dragReorderToIndex;
 }
 
+- (BOOL)isAccessibilityElement { return YES; }
+- (NSString *)accessibilityRole { return NSAccessibilityTabGroupRole; }
+- (NSString *)accessibilityLabel { return [[NppLocalizer shared] translate:@"Open documents"]; }
+- (NSArray *)accessibilityChildren { return [_items copy]; }
+
 - (instancetype)initWithFrame:(NSRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
@@ -622,6 +665,7 @@ static CGFloat tabShrinkFloor(_NppTabItem *item) {
     }
     _selectedIndex                = index;
     _items[index].isSelected      = YES;
+    NSAccessibilityPostNotification(_items[index], NSAccessibilityValueChangedNotification);
     [_items[index] setNeedsDisplay:YES];
     [self relayout];
     [self scrollTabToVisible:index];
