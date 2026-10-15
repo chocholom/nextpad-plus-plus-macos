@@ -364,6 +364,7 @@ static int nppDetectEOLMode(const char *bytes, NSUInteger len) {
     if (dragTypes.count) [contentView registerForDraggedTypes:dragTypes];
 
     [self applyDefaultTheme];
+    [_scintillaView message:SCI_SETEOLMODE wParam:nppEOLModeFromPrefs()];
 
     [[NSNotificationCenter defaultCenter]
         addObserver:self selector:@selector(_preferencesChanged:)
@@ -1778,7 +1779,6 @@ static NSColor *nppColorFromHex(NSString *hex) {
     // Indentation guides — honour the persisted kPrefShowIndentGuides toggle.
     BOOL showGuides = [[NSUserDefaults standardUserDefaults] boolForKey:kPrefShowIndentGuides];
     [sci message:SCI_SETINDENTATIONGUIDES wParam:(showGuides ? SC_IV_LOOKBOTH : SC_IV_NONE)];
-    [sci message:SCI_SETEOLMODE wParam:nppEOLModeFromPrefs()];
     NPPStyleEntry *gsIndent = [store globalStyleNamed:@"Indent guideline style"];
     if (gsIndent.fgColor) [sci setColorProperty:SCI_STYLESETFORE parameter:37 value:gsIndent.fgColor];
     if (gsIndent.bgColor) [sci setColorProperty:SCI_STYLESETBACK parameter:37 value:gsIndent.bgColor];
