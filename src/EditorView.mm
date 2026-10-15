@@ -302,6 +302,9 @@ static NSUInteger nppLargeFileThreshold(void) {
     // Git gutter state
     BOOL               _gitGutterEnabled;
 
+    BOOL _sortingRectangle;
+    sptr_t _sortColumnStart, _sortColumnEnd;
+
     // Hex view
 }
 
@@ -5099,14 +5102,23 @@ static NSSet<NSString *> *_cLikeLanguages() {
     ScintillaView *sci = _scintillaView;
     sptr_t selStart = [sci message:SCI_GETSELECTIONSTART];
     sptr_t selEnd   = [sci message:SCI_GETSELECTIONEND];
-    BOOL hasSelection = (selStart != selEnd);
+    _sortingRectangle = [sci message:SCI_SELECTIONISRECTANGLE] || [sci message:SCI_GETSELECTIONMODE] == SC_SEL_THIN;
+    _sortColumnStart = _sortColumnEnd = 0;
+    if (_sortingRectangle) {
+        sptr_t anchor = [sci message:SCI_GETRECTANGULARSELECTIONANCHOR], caret = [sci message:SCI_GETRECTANGULARSELECTIONCARET];
+        sptr_t ac = [sci message:SCI_GETCOLUMN wParam:anchor] + [sci message:SCI_GETRECTANGULARSELECTIONANCHORVIRTUALSPACE];
+        sptr_t cc = [sci message:SCI_GETCOLUMN wParam:caret] + [sci message:SCI_GETRECTANGULARSELECTIONCARETVIRTUALSPACE];
+        _sortColumnStart = MIN(ac, cc); _sortColumnEnd = MAX(ac, cc);
+        selStart = MIN(anchor,caret); selEnd = MAX(anchor,caret);
+    }
+    BOOL hasSelection = (selStart != selEnd) || _sortingRectangle;
 
     sptr_t lineStart, lineEnd;
     if (hasSelection) {
         lineStart = [sci message:SCI_LINEFROMPOSITION wParam:(uptr_t)selStart];
         lineEnd   = [sci message:SCI_LINEFROMPOSITION wParam:(uptr_t)selEnd];
         // If selection ends at col 0 of the next line, don't include that line
-        if (selEnd == [sci message:SCI_POSITIONFROMLINE wParam:(uptr_t)lineEnd] && lineEnd > lineStart)
+        if (!_sortingRectangle && selEnd == [sci message:SCI_POSITIONFROMLINE wParam:(uptr_t)lineEnd] && lineEnd > lineStart)
             lineEnd--;
     } else {
         lineStart = 0;
@@ -5144,6 +5156,11 @@ static NSSet<NSString *> *_cLikeLanguages() {
 }
 
 - (void)applySortedLines:(NSArray<NSString *> *)lines startPos:(sptr_t)start endPos:(sptr_t)end {
+    sptr_t anchor=[_scintillaView message:SCI_GETRECTANGULARSELECTIONANCHOR];
+    sptr_t caret=[_scintillaView message:SCI_GETRECTANGULARSELECTIONCARET];
+    sptr_t anchorLine=[_scintillaView message:SCI_LINEFROMPOSITION wParam:anchor];
+    sptr_t caretLine=[_scintillaView message:SCI_LINEFROMPOSITION wParam:caret];
+    BOOL reverse=[_scintillaView message:SCI_GETCOLUMN wParam:anchor]>[_scintillaView message:SCI_GETCOLUMN wParam:caret];
     NSString *eol = self.eolName;
     NSString *sep = [eol isEqualToString:@"CRLF"] ? @"\r\n" : [eol isEqualToString:@"CR"] ? @"\r" : @"\n";
     NSString *joined = [lines componentsJoinedByString:sep];
@@ -5156,12 +5173,37 @@ static NSSet<NSString *> *_cLikeLanguages() {
     [_scintillaView message:SCI_REPLACETARGET  wParam:(uptr_t)strlen(joinedUTF8)
                                                lParam:(sptr_t)joinedUTF8];
     [_scintillaView message:SCI_ENDUNDOACTION];
+    if (_sortingRectangle) {
+        sptr_t ac=reverse?_sortColumnEnd:_sortColumnStart, cc=reverse?_sortColumnStart:_sortColumnEnd;
+        sptr_t ap=[_scintillaView message:SCI_FINDCOLUMN wParam:anchorLine lParam:ac];
+        sptr_t cp=[_scintillaView message:SCI_FINDCOLUMN wParam:caretLine lParam:cc];
+        [_scintillaView message:SCI_SETRECTANGULARSELECTIONANCHOR wParam:ap];
+        [_scintillaView message:SCI_SETRECTANGULARSELECTIONCARET wParam:cp];
+        [_scintillaView message:SCI_SETRECTANGULARSELECTIONANCHORVIRTUALSPACE wParam:MAX(0,ac-[_scintillaView message:SCI_GETCOLUMN wParam:ap])];
+        [_scintillaView message:SCI_SETRECTANGULARSELECTIONCARETVIRTUALSPACE wParam:MAX(0,cc-[_scintillaView message:SCI_GETCOLUMN wParam:cp])];
+    }
+}
+
+- (NSString *)_sortKey:(NSString *)line {
+    if (!_sortingRectangle) return line;
+    NSInteger column=0;
+    NSMutableString *key=[NSMutableString new];
+    NSInteger width=MAX(1,[_scintillaView message:SCI_GETTABWIDTH]);
+    for (NSUInteger i=0; i<line.length;) {
+        NSRange r=[line rangeOfComposedCharacterSequenceAtIndex:i];
+        NSString *ch=[line substringWithRange:r];
+        NSInteger next=column+([ch isEqualToString:@"\t"] ? width-column%width : 1);
+        if (next>_sortColumnStart && (_sortColumnEnd==_sortColumnStart || column<_sortColumnEnd)) [key appendString:ch];
+        column=next; i=NSMaxRange(r);
+        if (_sortColumnEnd>_sortColumnStart && column>=_sortColumnEnd) break;
+    }
+    return key;
 }
 
 - (void)sortLinesAscending:(id)sender {
     sptr_t s, e;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
-    [lines sortUsingSelector:@selector(compare:)];
+    [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) { return [[self _sortKey:a] compare:[self _sortKey:b]]; }];
     [self applySortedLines:lines startPos:s endPos:e];
 }
 
@@ -5169,6 +5211,7 @@ static NSSet<NSString *> *_cLikeLanguages() {
     sptr_t s, e;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
     [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        a=[self _sortKey:a]; b=[self _sortKey:b];
         return [b compare:a];
     }];
     [self applySortedLines:lines startPos:s endPos:e];
@@ -5178,6 +5221,7 @@ static NSSet<NSString *> *_cLikeLanguages() {
     sptr_t s, e;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
     [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        a=[self _sortKey:a]; b=[self _sortKey:b];
         return [a caseInsensitiveCompare:b];
     }];
     [self applySortedLines:lines startPos:s endPos:e];
@@ -5187,6 +5231,7 @@ static NSSet<NSString *> *_cLikeLanguages() {
     sptr_t s, e;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
     [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        a=[self _sortKey:a]; b=[self _sortKey:b];
         if (a.length < b.length) return NSOrderedAscending;
         if (a.length > b.length) return NSOrderedDescending;
         return NSOrderedSame;
@@ -5198,6 +5243,7 @@ static NSSet<NSString *> *_cLikeLanguages() {
     sptr_t s, e;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
     [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        a=[self _sortKey:a]; b=[self _sortKey:b];
         if (a.length > b.length) return NSOrderedAscending;
         if (a.length < b.length) return NSOrderedDescending;
         return NSOrderedSame;
@@ -5505,7 +5551,7 @@ static const unsigned int kSCI_GetBidirectional = 2708;
 - (void)sortLinesRandomly:(id)sender {
     sptr_t s, e;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
-    for (NSUInteger i = lines.count - 1; i > 0; i--) {
+    for (NSUInteger i = lines.count ? lines.count - 1 : 0; i > 0; i--) {
         NSUInteger j = arc4random_uniform((uint32_t)(i + 1));
         [lines exchangeObjectAtIndex:i withObjectAtIndex:j];
     }
@@ -5523,6 +5569,7 @@ static const unsigned int kSCI_GetBidirectional = 2708;
     sptr_t s, e;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
     [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        a=[self _sortKey:a]; b=[self _sortKey:b];
         long long va = [a longLongValue];
         long long vb = [b longLongValue];
         return va < vb ? NSOrderedAscending : va > vb ? NSOrderedDescending : NSOrderedSame;
@@ -5534,6 +5581,7 @@ static const unsigned int kSCI_GetBidirectional = 2708;
     sptr_t s, e;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
     [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        a=[self _sortKey:a]; b=[self _sortKey:b];
         long long va = [a longLongValue];
         long long vb = [b longLongValue];
         return va > vb ? NSOrderedAscending : va < vb ? NSOrderedDescending : NSOrderedSame;
@@ -5545,6 +5593,7 @@ static const unsigned int kSCI_GetBidirectional = 2708;
     sptr_t s, e;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
     [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        a=[self _sortKey:a]; b=[self _sortKey:b];
         double va = a.doubleValue;
         double vb = b.doubleValue;
         return va < vb ? NSOrderedAscending : va > vb ? NSOrderedDescending : NSOrderedSame;
@@ -5556,6 +5605,7 @@ static const unsigned int kSCI_GetBidirectional = 2708;
     sptr_t s, e;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
     [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        a=[self _sortKey:a]; b=[self _sortKey:b];
         double va = a.doubleValue;
         double vb = b.doubleValue;
         return va > vb ? NSOrderedAscending : va < vb ? NSOrderedDescending : NSOrderedSame;
@@ -5568,6 +5618,7 @@ static const unsigned int kSCI_GetBidirectional = 2708;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
     NSLocale *commaLocale = [NSLocale localeWithLocaleIdentifier:@"fr_FR"]; // uses comma as decimal separator
     [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        a=[self _sortKey:a]; b=[self _sortKey:b];
         double va = [[NSDecimalNumber decimalNumberWithString:a locale:commaLocale] doubleValue];
         double vb = [[NSDecimalNumber decimalNumberWithString:b locale:commaLocale] doubleValue];
         return va < vb ? NSOrderedAscending : va > vb ? NSOrderedDescending : NSOrderedSame;
@@ -5580,6 +5631,7 @@ static const unsigned int kSCI_GetBidirectional = 2708;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
     NSLocale *commaLocale = [NSLocale localeWithLocaleIdentifier:@"fr_FR"];
     [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        a=[self _sortKey:a]; b=[self _sortKey:b];
         double va = [[NSDecimalNumber decimalNumberWithString:a locale:commaLocale] doubleValue];
         double vb = [[NSDecimalNumber decimalNumberWithString:b locale:commaLocale] doubleValue];
         return va > vb ? NSOrderedAscending : va < vb ? NSOrderedDescending : NSOrderedSame;
