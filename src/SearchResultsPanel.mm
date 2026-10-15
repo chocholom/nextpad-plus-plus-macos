@@ -120,6 +120,8 @@ struct _SRLineInfo {
         [_sci message:SCI_SETILEXER wParam:0 lParam:(sptr_t)lexer];
     }
 
+    [_sci message:SCI_SETSCROLLWIDTHTRACKING wParam:1];
+
     // Read-only
     [_sci message:SCI_SETREADONLY wParam:1];
 
