@@ -108,6 +108,7 @@ set(APP_SRCS
     src/AppDelegate.mm
     src/MainWindowController.mm
     src/TahoeToolbarConfig.mm
+    src/NppAPICompletion.mm
     src/EditorView.mm
     src/TabManager.mm
     src/NppTabBar.mm
@@ -489,3 +490,6 @@ target_link_libraries(NotepadPlusPlusMac PRIVATE
 set_source_files_properties(${APP_SRCS} PROPERTIES
     COMPILE_FLAGS "-fobjc-arc"
 )
+
+add_custom_command(TARGET NotepadPlusPlusMac POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/resources/autoCompletion" "$<TARGET_BUNDLE_DIR:NotepadPlusPlusMac>/Contents/Resources/autoCompletion")
