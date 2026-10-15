@@ -5049,48 +5049,68 @@ static NSSet<NSString *> *_cLikeLanguages() {
     [self replaceSelectionWith:sel.lowercaseString];
 }
 
+- (void)_transformSelectedText:(NSString *(^)(NSString *))transform {
+    ScintillaView *sci=_scintillaView;
+    NSMutableArray<NSMutableDictionary *> *ranges=[NSMutableArray new];
+    for (sptr_t i=0;i<[sci message:SCI_GETSELECTIONS];i++) {
+        sptr_t anchor=[sci message:SCI_GETSELECTIONNANCHOR wParam:i],caret=[sci message:SCI_GETSELECTIONNCARET wParam:i];
+        [ranges addObject:[@{@"index":@(i),@"anchor":@(anchor),@"caret":@(caret),@"start":@(MIN(anchor,caret)),@"end":@(MAX(anchor,caret))} mutableCopy]];
+    }
+    NSArray *ordered=[ranges sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a,NSDictionary *b){return [a[@"start"] compare:b[@"start"]];}];
+    sptr_t delta=0;
+    for (NSMutableDictionary *r in ordered) {
+        sptr_t start=[r[@"start"] longLongValue],end=[r[@"end"] longLongValue];
+        std::vector<char> bytes((size_t)(end-start)+1);Sci_TextRangeFull tr={{start,end},bytes.data()};
+        [sci message:SCI_GETTEXTRANGEFULL wParam:0 lParam:(sptr_t)&tr];
+        NSString *part=[[NSString alloc] initWithBytes:bytes.data() length:end-start encoding:NSUTF8StringEncoding];
+        NSData *replacement=[(part.length?transform(part):@"") dataUsingEncoding:NSUTF8StringEncoding];
+        r[@"replacement"]=replacement ?: NSData.data;r[@"newStart"]=@(start+delta);r[@"newEnd"]=@(start+delta+replacement.length);
+        delta+=(sptr_t)replacement.length-(end-start);
+    }
+    [sci message:SCI_BEGINUNDOACTION];
+    for (NSDictionary *r in ordered.reverseObjectEnumerator) {
+        sptr_t start=[r[@"start"] longLongValue],end=[r[@"end"] longLongValue];
+        if (start==end) continue;
+        NSData *data=r[@"replacement"];[sci message:SCI_SETTARGETRANGE wParam:start lParam:end];
+        [sci message:SCI_REPLACETARGET wParam:data.length lParam:(sptr_t)data.bytes];
+    }
+    for (NSDictionary *r in ranges) {
+        BOOL forward=[r[@"anchor"] longLongValue]<=[r[@"caret"] longLongValue];
+        [sci message:SCI_SETSELECTIONNANCHOR wParam:[r[@"index"] integerValue] lParam:[r[forward?@"newStart":@"newEnd"] longLongValue]];
+        [sci message:SCI_SETSELECTIONNCARET wParam:[r[@"index"] integerValue] lParam:[r[forward?@"newEnd":@"newStart"] longLongValue]];
+    }
+    [sci message:SCI_ENDUNDOACTION];
+}
+
 - (void)convertToProperCase:(id)sender {
-    NSString *sel = [self selectedText]; if (!sel) return;
-    [self replaceSelectionWith:sel.capitalizedString];
+    [self _transformSelectedText:^NSString *(NSString *part){return part.capitalizedString;}];
 }
-
-- (void)convertToSentenceCase:(id)sender {
-    NSString *sel = [self selectedText]; if (!sel) return;
-    NSMutableString *result = [sel mutableCopy];
-    BOOL nextUpper = YES;
-    for (NSUInteger i = 0; i < result.length; i++) {
-        unichar c = [result characterAtIndex:i];
-        if (nextUpper && isalpha(c)) {
-            [result replaceCharactersInRange:NSMakeRange(i, 1)
-                                  withString:[[NSString stringWithCharacters:&c length:1] uppercaseString]];
-            nextUpper = NO;
-        } else if (c == '.' || c == '!' || c == '?') {
-            nextUpper = YES;
-        }
-    }
-    [self replaceSelectionWith:result];
+- (void)_sentenceCaseBlend:(BOOL)blend {
+    [self _transformSelectedText:^NSString *(NSString *part){
+        NSMutableString *out=[NSMutableString new];__block BOOL first=YES;
+        [part enumerateSubstringsInRange:NSMakeRange(0,part.length) options:NSStringEnumerationByComposedCharacterSequences usingBlock:^(NSString *ch,NSRange range,NSRange enclosing,BOOL *stop){
+            BOOL letter=[ch rangeOfCharacterFromSet:NSCharacterSet.letterCharacterSet].location!=NSNotFound;
+            [out appendString:letter?(first?ch.uppercaseString:blend?ch:ch.lowercaseString):ch];
+            if(letter)first=NO;else if([@".!?" containsString:ch])first=YES;
+        }];return out;
+    }];
 }
-
+- (void)convertToSentenceCase:(id)sender { [self _sentenceCaseBlend:NO]; }
 - (void)convertToInvertedCase:(id)sender {
-    NSString *sel = [self selectedText]; if (!sel) return;
-    NSMutableString *result = [NSMutableString stringWithCapacity:sel.length];
-    for (NSUInteger i = 0; i < sel.length; i++) {
-        unichar c = [sel characterAtIndex:i];
-        NSString *ch = [NSString stringWithCharacters:&c length:1];
-        [result appendString:isupper(c) ? ch.lowercaseString : ch.uppercaseString];
-    }
-    [self replaceSelectionWith:result];
+    [self _transformSelectedText:^NSString *(NSString *part){
+        NSMutableString *out=[NSMutableString new];
+        [part enumerateSubstringsInRange:NSMakeRange(0,part.length) options:NSStringEnumerationByComposedCharacterSequences usingBlock:^(NSString *ch,NSRange range,NSRange enclosing,BOOL *stop){
+            [out appendString:[ch isEqual:ch.lowercaseString]?ch.uppercaseString:ch.lowercaseString];
+        }];return out;
+    }];
 }
-
 - (void)convertToRandomCase:(id)sender {
-    NSString *sel = [self selectedText]; if (!sel) return;
-    NSMutableString *result = [NSMutableString stringWithCapacity:sel.length];
-    for (NSUInteger i = 0; i < sel.length; i++) {
-        unichar c = [sel characterAtIndex:i];
-        NSString *ch = [NSString stringWithCharacters:&c length:1];
-        [result appendString:(arc4random_uniform(2) == 0) ? ch.uppercaseString : ch.lowercaseString];
-    }
-    [self replaceSelectionWith:result];
+    [self _transformSelectedText:^NSString *(NSString *part){
+        NSMutableString *out=[NSMutableString new];
+        [part enumerateSubstringsInRange:NSMakeRange(0,part.length) options:NSStringEnumerationByComposedCharacterSequences usingBlock:^(NSString *ch,NSRange range,NSRange enclosing,BOOL *stop){
+            [out appendString:arc4random_uniform(2)?ch.uppercaseString:ch.lowercaseString];
+        }];return out;
+    }];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -5494,45 +5514,15 @@ static const unsigned int kSCI_GetBidirectional = 2708;
 
 /// Proper Case (Blend): uppercase first letter of each word, leave rest unchanged.
 - (void)convertToProperCaseBlend:(id)sender {
-    NSString *sel = [self selectedText]; if (!sel) return;
-    NSMutableString *result = [sel mutableCopy];
-    BOOL prevWasAlnum = NO;
-    for (NSUInteger i = 0; i < result.length; i++) {
-        unichar c = [result characterAtIndex:i];
-        if ([[NSCharacterSet letterCharacterSet] characterIsMember:c]) {
-            if (!prevWasAlnum) {
-                unichar up = [[[NSString stringWithCharacters:&c length:1] uppercaseString] characterAtIndex:0];
-                [result replaceCharactersInRange:NSMakeRange(i, 1)
-                                     withString:[NSString stringWithCharacters:&up length:1]];
-            }
-            prevWasAlnum = YES;
-        } else {
-            prevWasAlnum = [[NSCharacterSet alphanumericCharacterSet] characterIsMember:c];
-        }
-    }
-    [self replaceSelectionWith:result];
+    [self _transformSelectedText:^NSString *(NSString *part){
+        NSMutableString *out=[NSMutableString new];__block BOOL first=YES;
+        [part enumerateSubstringsInRange:NSMakeRange(0,part.length) options:NSStringEnumerationByComposedCharacterSequences usingBlock:^(NSString *ch,NSRange range,NSRange enclosing,BOOL *stop){
+            BOOL letter=[ch rangeOfCharacterFromSet:NSCharacterSet.letterCharacterSet].location!=NSNotFound;
+            [out appendString:(letter&&first)?ch.uppercaseString:ch];first=!letter;
+        }];return out;
+    }];
 }
-
-/// Sentence case (Blend): uppercase first letter of each sentence, leave rest unchanged.
-- (void)convertToSentenceCaseBlend:(id)sender {
-    NSString *sel = [self selectedText]; if (!sel) return;
-    NSMutableString *result = [sel mutableCopy];
-    BOOL nextUpper = YES;
-    for (NSUInteger i = 0; i < result.length; i++) {
-        unichar c = [result characterAtIndex:i];
-        if ([[NSCharacterSet letterCharacterSet] characterIsMember:c]) {
-            if (nextUpper) {
-                unichar up = [[[NSString stringWithCharacters:&c length:1] uppercaseString] characterAtIndex:0];
-                [result replaceCharactersInRange:NSMakeRange(i, 1)
-                                     withString:[NSString stringWithCharacters:&up length:1]];
-                nextUpper = NO;
-            }
-        } else if (c == '.' || c == '!' || c == '?') {
-            nextUpper = YES;
-        }
-    }
-    [self replaceSelectionWith:result];
-}
+- (void)convertToSentenceCaseBlend:(id)sender { [self _sentenceCaseBlend:YES]; }
 
 // ─────────────────────────────────────────────────────────────────────────────
 #pragma mark - Join Lines / Sort Extensions
@@ -6203,6 +6193,7 @@ static const unsigned int kSCI_GetBidirectional = 2708;
     if (!funcName.length) { NSBeep(); return; }
     NSString *tip = [NSString stringWithFormat:@"%@( ... )", funcName];
     [sci message:SCI_CALLTIPSHOW wParam:(uptr_t)nameStart lParam:(sptr_t)tip.UTF8String];
+
 }
 
 - (void)triggerFunctionCompletion:(id)sender {
