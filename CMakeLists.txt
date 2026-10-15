@@ -121,6 +121,7 @@ set(APP_SRCS
     src/FloatingPanelWindow.mm
     src/DocumentListPanel.mm
     src/ClipboardHistoryPanel.mm
+    src/NppParserRegex.mm
     src/FunctionListPanel.mm
     src/DocumentMapPanel.mm
     src/ProjectPanel.mm
