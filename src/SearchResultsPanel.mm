@@ -463,7 +463,6 @@ static sptr_t _srSciColor(NSColor *c) {
      forSearchText:(NSString *)searchText
            options:(NPPFindOptions *)opts
       filesSearched:(NSInteger)filesSearched {
-    if (!fileResults.count) return;
 
     // Purge previous results if enabled
     if (_purgeBeforeSearch) [self clearAll];
