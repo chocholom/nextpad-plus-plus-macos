@@ -1,5 +1,6 @@
 #import <Cocoa/Cocoa.h>
 #import "NppApplication.h"
+#import "NppPaths.h"
 #import "AppDelegate.h"
 #import "NppCommandLineParams.h"
 
@@ -45,6 +46,8 @@ int main(int argc, const char *argv[]) {
     @autoreleasepool {
         // Parse command line arguments before NSApplication starts
         NppCommandLineParams *cliParams = [[NppCommandLineParams alloc] initWithArgc:argc argv:argv];
+
+        if (cliParams.settingsDir.length) NppSetConfigDirOverride(cliParams.settingsDir);
 
         // --help: print usage to stdout and exit immediately (no GUI)
         if (cliParams.showHelp) {
