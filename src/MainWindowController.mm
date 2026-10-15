@@ -10386,7 +10386,7 @@ static NSString *_makeCLIScriptForApp(NSString *appPath) {
          "    # `open --args` is silently dropped when the app is already\n"
          "    # running. Files ride behind --args so a fresh instance gets\n"
          "    # them too.\n"
-         "    open -a \"$APP\" --args \"${flags[@]}\" \"${files[@]}\"\n"
+         "    open -na \"$APP\" --args \"${flags[@]}\" \"${files[@]}\"\n"
          "elif [ ${#files[@]} -gt 0 ]; then\n"
          "    # Files only: pass them as `open` document arguments so an\n"
          "    # already-running instance opens them via application:openFiles:.\n"
