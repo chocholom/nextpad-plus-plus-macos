@@ -98,8 +98,10 @@ NSString *NppConfigDir(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         sConfigInitialized = YES;
-        dir = sConfigOverride ?: NppComputeConfigDir();
-        if (!sConfigOverride) NppMigrateLegacyIfNeeded(dir);
+        NSString *environmentOverride = NSProcessInfo.processInfo.environment[@"NEXTPAD_SETTINGS_DIR"];
+        NSString *override = sConfigOverride.length ? sConfigOverride : environmentOverride;
+        dir = override.length ? [override.stringByExpandingTildeInPath stringByStandardizingPath] : NppComputeConfigDir();
+        if (!override.length) NppMigrateLegacyIfNeeded(dir);
         [[NSFileManager defaultManager] createDirectoryAtPath:dir
                                   withIntermediateDirectories:YES
                                                    attributes:nil
