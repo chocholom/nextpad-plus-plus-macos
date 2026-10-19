@@ -134,6 +134,7 @@ set(APP_SRCS
     src/FunctionListPanel.mm
     src/DocumentMapPanel.mm
     src/ProjectPanel.mm
+    src/NppFileFilter.mm
     src/SearchCore.mm
     src/SearchEngine.mm
     src/NppTextEncoding.mm

@@ -532,6 +532,20 @@ int main() {
                   [NSString stringWithFormat:@"status=%ld", (long)st]);
         }
 
+        // Notepad++ filter syntax must prune directories before visiting files.
+        {
+            for (NSString *name in @[@"filters/README",@"filters/a.c",@"filters/a.h",@"filters/trace.log",@"filters/build/x.c",@"filters/src/build/keep.c",@"filters/src/node_modules/deep/x.c"])
+                writeData(name, [@"needle" dataUsingEncoding:NSUTF8StringEncoding]);
+            NPPFindOptions *o=options(@"needle",NPPSearchNormal);
+            o.filters=@"*.* !*.log !\\build !+\\node_modules";
+            NSInteger scanned=0;
+            NSArray *found=[NPPSearchCore findInDirectory:pathFor(@"filters") options:o progressBlock:nil cancelToken:nil totalFilesScanned:&scanned regexError:NULL];
+            check(@"filters: extensionless file included; root and recursive exclusions pruned", found.count==4 && scanned==4 && resultsFor(found,@"filters/README") && resultsFor(found,@"filters/src/build/keep.c"));
+            o.filters=@"*.c;*.h !+\\node_modules !\\build";
+            found=[NPPSearchCore findInDirectory:pathFor(@"filters") options:o progressBlock:nil cancelToken:nil totalFilesScanned:&scanned regexError:NULL];
+            check(@"filters: semicolon includes combined with directory exclusions", found.count==3 && scanned==3);
+        }
+
         // ---- Results model --------------------------------------------------------
         {
             NSMutableArray<NPPSearchResult *> *results = [NSMutableArray array];

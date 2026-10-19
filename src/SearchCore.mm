@@ -1,3 +1,4 @@
+#import "NppFileFilter.h"
 #import "SearchCore.h"
 #import "Scintilla.h"
 #import "NppTextEncoding.h"
@@ -614,25 +615,6 @@ static CollectResult collectHits(NppSearch::BufferSearch &search, const std::str
 
 #pragma mark - Find in Files
 
-/// File-name filter predicates for opts.filters ("*.c *.h", "*.txt, *.md").
-+ (NSArray<NSPredicate *> *)_filterPredicatesForOptions:(NPPFindOptions *)opts {
-    NSArray<NSString *> *globs = [opts.filters componentsSeparatedByCharactersInSet:
-        [NSCharacterSet characterSetWithCharactersInString:@", "]];
-    NSMutableArray<NSPredicate *> *preds = [NSMutableArray array];
-    for (NSString *g in globs) {
-        NSString *t = [g stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        if (t.length) [preds addObject:[NSPredicate predicateWithFormat:@"SELF LIKE[c] %@", t]];
-    }
-    return preds;
-}
-
-+ (BOOL)_name:(NSString *)name passesFilters:(NSArray<NSPredicate *> *)preds {
-    if (preds.count == 0) return YES;
-    for (NSPredicate *p in preds)
-        if ([p evaluateWithObject:name]) return YES;
-    return NO;
-}
-
 /// Search one file. Returns its results, or nil when it has no hits or can't
 /// be read (binary, undecodable). Sets *regexError if the regex failed.
 + (nullable NPPFileResults *)_searchFile:(NSString *)full
@@ -728,7 +710,7 @@ static CollectResult collectHits(NppSearch::BufferSearch &search, const std::str
                                    regexError:(NSString * _Nullable * _Nullable)regexError {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSDirectoryEnumerator *en = [fm enumeratorAtPath:directory];
-    NSArray<NSPredicate *> *preds = [self _filterPredicatesForOptions:opts];
+    NppFileFilter *filter = [[NppFileFilter alloc] initWithString:opts.filters];
     const BOOL skipHidden = !opts.isInHiddenDirs;
 
     NSString * _Nullable (^nextPath)(void) = ^NSString * _Nullable {
@@ -742,12 +724,12 @@ static CollectResult collectHits(NppSearch::BufferSearch &search, const std::str
             if (isDir) {
                 // Skip hidden directories, and every subdirectory unless
                 // "In all sub-folders" is on (#317).
-                if (!opts.isRecursive || (skipHidden && [name hasPrefix:@"."])) [en skipDescendants];
+                if (!opts.isRecursive || [filter excludesDirectory:rel] || (skipHidden && [name hasPrefix:@"."])) [en skipDescendants];
                 continue;
             }
             // Skip hidden files
             if (skipHidden && [name hasPrefix:@"."]) continue;
-            if (![self _name:name passesFilters:preds]) continue;
+            if (![filter matchesFileName:name]) continue;
             return full;
         }
         return nil;
@@ -764,14 +746,14 @@ static CollectResult collectHits(NppSearch::BufferSearch &search, const std::str
                             totalFilesScanned:(nullable NSInteger *)totalFilesScanned
                                    regexError:(NSString * _Nullable * _Nullable)regexError {
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSArray<NSPredicate *> *preds = [self _filterPredicatesForOptions:opts];
+    NppFileFilter *filter = [[NppFileFilter alloc] initWithString:opts.filters];
     __block NSUInteger index = 0;
 
     NSString * _Nullable (^nextPath)(void) = ^NSString * _Nullable {
         while (index < filePaths.count) {
             NSString *full = filePaths[index++];
             if (![fm fileExistsAtPath:full]) continue;
-            if (![self _name:full.lastPathComponent passesFilters:preds]) continue;
+            if (![filter matchesFileName:full.lastPathComponent]) continue;
             return full;
         }
         return nil;
