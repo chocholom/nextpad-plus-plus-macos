@@ -1,5 +1,6 @@
 #import "NppParserRegex.h"
 #define BOOST_REGEX_STANDALONE
+#define BOOST_HAS_THREADS
 #include "../regex/boost/regex.hpp"
 #include <memory>
 #include <vector>
@@ -25,7 +26,7 @@
         memcpy(wide.data(),data.bytes,data.length);
         result->_regex=std::make_unique<boost::wregex>();
         result->_regex->imbue(std::locale("en_US.UTF-8"));
-        auto flags=boost::regex::perl;
+        boost::regex::flag_type flags=boost::regex::perl;
         if (!(options & NSRegularExpressionDotMatchesLineSeparators)) flags|=boost::regex::no_mod_s;
         else flags|=boost::regex::mod_s;
         if (!(options & NSRegularExpressionAnchorsMatchLines)) flags|=boost::regex::no_mod_m;

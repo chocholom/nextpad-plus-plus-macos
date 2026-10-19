@@ -473,6 +473,7 @@ set_target_properties(NotepadPlusPlusMac PROPERTIES
 )
 
 target_include_directories(NotepadPlusPlusMac PRIVATE
+    "${NPP_REGEX_ROOT}"
     src
     "${SCI_ROOT}/include"
     "${SCI_ROOT}/cocoa"
