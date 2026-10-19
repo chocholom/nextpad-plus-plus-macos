@@ -4947,6 +4947,10 @@ static void removeMacroFromShortcutsXML(NSString *name) {
             @"caretVS":@([sci message:SCI_GETSELECTIONNCARETVIRTUALSPACE wParam:i])}];
     for (sptr_t line=0; (line=[sci message:SCI_MARKERNEXT wParam:line lParam:1<<kNamedSessionBookmarkMarker])>=0; line++) [marks addObject:@(line)];
     for (sptr_t line=0; (line=[sci message:SCI_CONTRACTEDFOLDNEXT wParam:line])>=0; line++) [folds addObject:@(line)];
+    info[@"rectAnchor"]=@([sci message:SCI_GETRECTANGULARSELECTIONANCHOR]);
+    info[@"rectCaret"]=@([sci message:SCI_GETRECTANGULARSELECTIONCARET]);
+    info[@"rectAnchorVS"]=@([sci message:SCI_GETRECTANGULARSELECTIONANCHORVIRTUALSPACE]);
+    info[@"rectCaretVS"]=@([sci message:SCI_GETRECTANGULARSELECTIONCARETVIRTUALSPACE]);
     info[@"documentID"]=[NSString stringWithFormat:@"%lld",(long long)[sci message:SCI_GETDOCPOINTER]];
     info[@"displayName"]=ed.displayName ?: @"untitled";
     info[@"encoding"]=[ed valueForKey:@"fileEncoding"];
@@ -4989,6 +4993,12 @@ static void removeMacroFromShortcutsXML(NSString *name) {
         }
         [sci message:SCI_SETMAINSELECTION wParam:MIN(i-1,[info[@"mainSelection"] unsignedIntegerValue])];
         [sci message:SCI_SETSELECTIONMODE wParam:[info[@"selMode"] integerValue]];
+        if([info[@"selMode"] integerValue]==SC_SEL_RECTANGLE && info[@"rectAnchor"]) {
+            [sci message:SCI_SETRECTANGULARSELECTIONANCHOR wParam:MIN(length,[info[@"rectAnchor"] unsignedIntegerValue])];
+            [sci message:SCI_SETRECTANGULARSELECTIONCARET wParam:MIN(length,[info[@"rectCaret"] unsignedIntegerValue])];
+            [sci message:SCI_SETRECTANGULARSELECTIONANCHORVIRTUALSPACE wParam:[info[@"rectAnchorVS"] unsignedIntegerValue]];
+            [sci message:SCI_SETRECTANGULARSELECTIONCARETVIRTUALSPACE wParam:[info[@"rectCaretVS"] unsignedIntegerValue]];
+        }
     } else if (info[@"cursorLine"]) [ed goToLineNumber:[info[@"cursorLine"] integerValue]];
     [sci message:SCI_SETFIRSTVISIBLELINE wParam:MAX(0,[info[@"firstVisibleLine"] longLongValue])];
     [sci message:SCI_SETXOFFSET wParam:MAX(0,[info[@"xOffset"] longLongValue])];
@@ -5034,7 +5044,8 @@ static void removeMacroFromShortcutsXML(NSString *name) {
         if([rgb isKindOfClass:NSArray.class] && rgb.count==4 && [mgr.tabBar respondsToSelector:@selector(setTabCustomColor:atIndex:)])
             [mgr.tabBar setTabCustomColor:[NSColor colorWithSRGBRed:[rgb[0] doubleValue] green:[rgb[1] doubleValue] blue:[rgb[2] doubleValue] alpha:[rgb[3] doubleValue]] atIndex:idx];
         if (info[@"pinned"] && [mgr.tabBar isTabPinnedAtIndex:idx] != [info[@"pinned"] boolValue]) [mgr.tabBar pinTabAtIndex:idx toggle:YES];
-        if ([info[@"selected"] boolValue]) { [mgr selectTabAtIndex:idx]; selected=ed; }
+        if ([info[@"paneSelected"] boolValue] || [info[@"selected"] boolValue]) [mgr selectTabAtIndex:idx];
+        if ([info[@"selected"] boolValue]) selected=ed;
         if (mgr==_subTabManagerV) [self _ensureVerticalViewVisible];
         if (mgr==_subTabManagerH) [self _ensureHorizontalViewVisible];
         [mgr refreshAllTabTitles];
@@ -5049,6 +5060,7 @@ static void removeMacroFromShortcutsXML(NSString *name) {
         NSMutableDictionary *info=[[self _namedSessionStateForEditor:ed] mutableCopy];
         info[@"view"]=mgr==_subTabManagerV?@"V":mgr==_subTabManagerH?@"H":@"main";
         info[@"selected"]=@(ed==[self currentEditor]);
+        info[@"paneSelected"]=@(ed==mgr.currentEditor);
         NSUInteger idx=[mgr.allEditors indexOfObject:ed];
         info[@"tabColorId"]=@([mgr.tabBar tabColorAtIndex:idx]);
         if([mgr.tabBar respondsToSelector:@selector(tabCustomColorAtIndex:)]) {
