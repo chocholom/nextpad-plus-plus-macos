@@ -12,6 +12,8 @@
 
 @interface NppTabBar (TabItemEvents)
 - (void)tabItemMouseDown:(_NppTabItem *)item event:(NSEvent *)event;
+- (void)tabItemSelected:(_NppTabItem *)item;
+- (void)tabItemClosed:(_NppTabItem *)item;
 @end
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -168,9 +170,14 @@ static NSImage *toolbarIcon(NSString *name) {
 - (NSString *)accessibilityLabel { return self.title ?: @""; }
 - (id)accessibilityValue { return @(self.isSelected); }
 - (NSString *)accessibilityHelp {
-    return [NSString stringWithFormat:@"%@%@%@ %ld", self.isModified ? [[NppLocalizer shared] translate:@"Edited"] : @"",
-        self.isPinned ? [[NppLocalizer shared] translate:@" Pinned"] : @"", [[NppLocalizer shared] translate:@" Tab"], (long)self.tabIndex+1];
+    NSMutableArray *details=[NSMutableArray new];
+    if(self.isModified) [details addObject:[[NppLocalizer shared] translate:@"Edited"]];
+    if(self.isPinned) [details addObject:[[NppLocalizer shared] translate:@"Pinned"]];
+    [details addObject:[NSString stringWithFormat:[[NppLocalizer shared] translate:@"Tab %ld of %ld"],
+        (long)self.tabIndex+1,(long)[(NppTabBar *)self.target tabCount]]];
+    return [details componentsJoinedByString:@", "];
 }
+
 - (BOOL)accessibilityPerformPress {
     if (!self.superview) return NO;
     [(NppTabBar *)self.target tabItemSelected:self]; return YES;
