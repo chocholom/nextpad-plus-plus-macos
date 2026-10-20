@@ -109,7 +109,7 @@ git fetch origin --tags
 python3 tools/compare-upstream.py --ref <release-tag> --patches --github
 ```
 
-Use `--repo /path/to/another/checkout` for a separate upstream checkout, and `--json` for machine-readable results. The script checks commit ancestry, optional stable patch IDs and the actual PR merge commit. A squash, reimplementation or refactor can remain unconfirmed even when the behavior exists. A closed PR can also have been superseded.
+Use `--repo /path/to/another/checkout` for a separate upstream checkout, and `--json` for machine-readable results. Fetching the integration branch into that checkout makes the frozen PR commits available for patch comparison. The script checks commit ancestry, optional stable patch IDs and the actual PR merge commit. A squash, reimplementation or refactor can remain unconfirmed even when the behavior exists. A closed PR can also have been superseded.
 
 After inspecting inclusion evidence, rerun the behavior checks against the candidate release, adapting the harness if its internal API changed. A compile failure in the harness alone is not proof of a user-visible regression. Pay particular attention to exact EOL bytes, zero-hit search history, unsaved-session conflicts, lexer/UDL style fidelity and the second-process CLI path.
 
