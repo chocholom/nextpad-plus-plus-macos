@@ -55,6 +55,8 @@ static NSDictionary<NSString *, NSString *> *toolbarIconMapping(void) {
 
 @implementation NppThemeManager {
     BOOL _cachedIsDark;
+    NSImage *_unsavedIconLight;   // -unsavedDocumentIconForDarkBackground: cache
+    NSImage *_unsavedIconDark;
 }
 
 @synthesize appearanceStyle = _appearanceStyle;
@@ -106,6 +108,8 @@ static NSDictionary<NSString *, NSString *> *toolbarIconMapping(void) {
 }
 
 - (void)_recalcIsDark {
+    _unsavedIconLight = nil;
+    _unsavedIconDark  = nil;
     switch (_mode) {
         case NppDarkModeLight: _cachedIsDark = NO; break;
         case NppDarkModeDark:  _cachedIsDark = YES; break;
@@ -275,6 +279,64 @@ static NSDictionary<NSString *, NSString *> *toolbarIconMapping(void) {
                          : [NSColor colorWithWhite:0.15 alpha:1];
 }
 
+// Unsaved-document marker. As saturated as each background allows while
+// keeping >= 4.5:1 on the Classic selected tab (white / 0x313131) and >= 3:1
+// on the orange-tinted Tahoe selected tab. A purer red (e.g. 0xFF3B30) is
+// too dark for 4.5:1 on the dark tab, so dark mode stays slightly warm.
+static NSColor *unsavedTintForDark(BOOL dark) {
+    return dark ? [NSColor colorWithRed:0xFF/255.0 green:0x68/255.0 blue:0x5E/255.0 alpha:1]
+                : [NSColor colorWithRed:0xD7/255.0 green:0x00/255.0 blue:0x15/255.0 alpha:1];
+}
+
+- (NSColor *)unsavedIconTint {
+    return unsavedTintForDark(_cachedIsDark);
+}
+
+- (nullable NSImage *)unsavedDocumentIconForDarkBackground:(BOOL)dark {
+    // The same outline save glyph saved documents use (regular/save_off),
+    // with the whole outline painted in the unsaved tint and the stroke
+    // thickened to about 1.6x (the glyph is stamped around a small ring
+    // before tinting) so it still reads at tab size in dark mode. Same shape
+    // and size as the saved icon. save_off_red colours just its thin label
+    // slot, which shrinks below a pixel at tab / list size and reads as the
+    // same grey floppy as a saved document.
+    // Cached per background (tabs redraw often); cleared in -_recalcIsDark.
+    NSImage *cached = dark ? _unsavedIconDark : _unsavedIconLight;
+    if (cached) return cached;
+    NSString *base = dark ? @"icons/dark/toolbar" : @"icons/light/toolbar";
+    NSString *path = [[NSBundle mainBundle] pathForResource:@"save_off" ofType:@"png"
+                                               inDirectory:[base stringByAppendingPathComponent:@"regular"]];
+    NSImage *glyph = path ? [[NSImage alloc] initWithContentsOfFile:path] : nil;
+    NSImage *icon;
+    if (glyph) {
+        NSColor *tint = unsavedTintForDark(dark);
+        icon = [NSImage imageWithSize:glyph.size flipped:NO drawingHandler:^BOOL(NSRect r) {
+            // The Fluent stroke is 1/24 of the glyph; growing it ~0.3/24 on
+            // each side gives ~1.6x the saved icon's weight.
+            CGFloat d = r.size.width * 0.013;
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    [glyph drawInRect:NSOffsetRect(r, dx * d, dy * d) fromRect:NSZeroRect
+                            operation:NSCompositingOperationSourceOver fraction:1.0];
+                }
+            }
+            [tint setFill];
+            NSRectFillUsingOperation(r, NSCompositingOperationSourceAtop);
+            return YES;
+        }];
+    } else {
+        NSString *red = [[NSBundle mainBundle] pathForResource:@"save_off_red" ofType:@"png"
+                                                  inDirectory:[base stringByAppendingPathComponent:@"regular"]];
+        icon = red ? [[NSImage alloc] initWithContentsOfFile:red] : nil;
+    }
+    if (dark) _unsavedIconDark = icon; else _unsavedIconLight = icon;
+    return icon;
+}
+
+- (nullable NSImage *)unsavedDocumentIcon {
+    return [self unsavedDocumentIconForDarkBackground:_cachedIsDark];
+}
+
 - (NSColor *)dividerDark {
     return _cachedIsDark ? [NSColor colorWithWhite:0.30 alpha:1]
                          : [NSColor colorWithWhite:0.55 alpha:1];
@@ -329,10 +391,45 @@ static NSDictionary<NSString *, NSString *> *toolbarIconMapping(void) {
                          : [NSColor colorWithRed:0xEC/255.0 green:0xEC/255.0 blue:0xEC/255.0 alpha:1];
 }
 
+// ── Surfaces painted with the editor theme ───────────────────────────────────
+
+// Theme colours may be in any colour space (calibrated, generic, catalog);
+// brightnessComponent raises on a non-RGB colour, so convert first.
+static BOOL _nppColorIsDark(NSColor *color) {
+    NSColor *rgb = [color colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+    return rgb ? rgb.brightnessComponent < 0.5 : NO;
+}
+
++ (NSAppearance *)appearanceForBackground:(NSColor *)background {
+    return [NSAppearance appearanceNamed:_nppColorIsDark(background)
+                                         ? NSAppearanceNameDarkAqua : NSAppearanceNameAqua];
+}
+
+- (NSColor *)documentMapViewportColorOnBackground:(NSColor *)background
+                                       themeColor:(nullable NSColor *)themeColor {
+    BOOL darkBg = _nppColorIsDark(background);
+    NSColor *focus = [themeColor colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+    // DarkModeDefault ships a black focus colour, which vanishes on its own
+    // dark background; the same happens to a light focus colour on a light
+    // theme. Only keep the theme colour when it stands apart from the map.
+    if (!focus || _nppColorIsDark(focus) == darkBg) {
+        focus = darkBg ? [NSColor whiteColor]
+                       : [NSColor colorWithSRGBRed:1.0 green:0x80/255.0 blue:0.0 alpha:1];
+    }
+    return [focus colorWithAlphaComponent:50.0 / 255.0];
+}
+
 // ── Icon Paths ───────────────────────────────────────────────────────────────
 
+// The toolbar icon set for a light or dark background. Shared by the chrome
+// (-toolbarIconDir) and theme-background (-toolbarIconNamed:forDarkBackground:)
+// lookups so the two can't drift apart.
+static NSString *_toolbarIconDirForDark(BOOL dark) {
+    return dark ? @"icons/dark/toolbar/regular" : @"icons/light/toolbar/regular";
+}
+
 - (NSString *)toolbarIconDir {
-    return _cachedIsDark ? @"icons/dark/toolbar/regular" : @"icons/light/toolbar/regular";
+    return _toolbarIconDirForDark(_cachedIsDark);
 }
 
 - (NSString *)tabbarIconDir {
@@ -344,7 +441,12 @@ static NSDictionary<NSString *, NSString *> *toolbarIconMapping(void) {
 }
 
 - (nullable NSImage *)toolbarIconNamed:(NSString *)standardName {
-    NSString *dir = self.toolbarIconDir;
+    return [self toolbarIconNamed:standardName forDarkBackground:_cachedIsDark];
+}
+
+- (nullable NSImage *)toolbarIconNamed:(NSString *)standardName
+                     forDarkBackground:(BOOL)darkBackground {
+    NSString *dir = _toolbarIconDirForDark(darkBackground);
 
     // Both light and dark dirs use Fluent naming — always map.
     NSString *fileName = toolbarIconMapping()[standardName];
@@ -355,10 +457,74 @@ static NSDictionary<NSString *, NSString *> *toolbarIconMapping(void) {
     return path ? [[NSImage alloc] initWithContentsOfFile:path] : nil;
 }
 
++ (BOOL)isDarkColor:(NSColor *)color {
+    // Theme colors may be in any color space (calibrated, generic, catalog);
+    // brightnessComponent raises on a non-RGB color, so convert first.
+    NSColor *rgb = [color colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+    return rgb ? rgb.brightnessComponent < 0.5 : NO;
+}
+
+
+
 - (nullable NSImage *)tabbarIconNamed:(NSString *)name {
     NSString *path = [[NSBundle mainBundle] pathForResource:name ofType:@"png"
                                                inDirectory:self.tabbarIconDir];
     return path ? [[NSImage alloc] initWithContentsOfFile:path] : nil;
 }
 
+@end
+
+// ── NppThemedLabel ───────────────────────────────────────────────────────────
+
+@interface _NppThemedLabelCell : NSTextFieldCell
+@property (nonatomic, strong, nullable) NSColor *themeTextColor;
+@end
+
+@implementation _NppThemedLabelCell
+- (BOOL)_isEditing {
+    NSView *cv = self.controlView;
+    return [cv isKindOfClass:[NSControl class]] && ((NSControl *)cv).currentEditor != nil;
+}
+- (void)_applyThemeTextColor {
+    if (!_themeTextColor) return;   // never themed: leave textColor alone
+    // While an inline rename is in progress the field editor draws its own
+    // background over the row, so the selected-text color would be white on
+    // white; keep the theme color then (editColumn: marks the cell Emphasized
+    // even when the row selection is not).
+    BOOL emphasized = self.backgroundStyle == NSBackgroundStyleEmphasized && ![self _isEditing];
+    self.textColor = emphasized ? NSColor.alternateSelectedControlTextColor : _themeTextColor;
+}
+- (NSText *)setUpFieldEditorAttributes:(NSText *)textObj {
+    textObj = [super setUpFieldEditorAttributes:textObj];
+    if (_themeTextColor) textObj.textColor = _themeTextColor;
+    return textObj;
+}
+- (void)endEditing:(NSText *)textObj {
+    [super endEditing:textObj];
+    [self _applyThemeTextColor];   // back to the row's selected/normal color
+}
+- (void)setThemeTextColor:(NSColor *)c {
+    _themeTextColor = c;
+    [self _applyThemeTextColor];
+}
+- (void)setBackgroundStyle:(NSBackgroundStyle)s {
+    [super setBackgroundStyle:s];
+    [self _applyThemeTextColor];
+}
+@end
+
+@implementation NppThemedLabel
++ (Class)cellClass { return [_NppThemedLabelCell class]; }
+- (nullable NSColor *)themeTextColor {
+    id c = self.cell;
+    return [c isKindOfClass:[_NppThemedLabelCell class]]
+        ? ((_NppThemedLabelCell *)c).themeTextColor : nil;
+}
+- (void)setThemeTextColor:(nullable NSColor *)c {
+    id cell = self.cell;
+    if ([cell isKindOfClass:[_NppThemedLabelCell class]])
+        ((_NppThemedLabelCell *)cell).themeTextColor = c;
+    else
+        self.textColor = c;
+}
 @end

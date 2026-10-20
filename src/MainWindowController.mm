@@ -11,6 +11,7 @@
 #import "FindWindow.h"
 #import "SearchResultsPanel.h"
 #import "SearchEngine.h"
+#import "NppScintillaIDs.h"
 #import "NPPBatchDialog.h"
 #import "MenuBuilder.h"
 #import "ColumnEditorPanel.h"
@@ -39,6 +40,7 @@
 #import "UserDefineLangManager.h"
 #import "UserDefineDialog.h"
 #import "NppThemeManager.h"
+#import "NppModelXmlMerge.h"
 #import "NppLocalizer.h"
 #import <objc/runtime.h>
 #include <sys/sysctl.h>
@@ -143,6 +145,71 @@ NSArray<NSDictionary *> *loadMacrosFromShortcutsXML(void);
 static void addMacroToShortcutsXML(NSString *name, NSArray<NSDictionary *> *actions,
                                    BOOL ctrl, BOOL alt, BOOL shift, BOOL cmd, NSUInteger keyCode);
 static void removeMacroFromShortcutsXML(NSString *name);
+
+static NSUInteger NPPShortcutKeyCodeForPopupName(NSString *name) {
+    if ([name isEqualToString:@"None"] || name.length == 0) return 0;
+    NSDictionary *map = @{@"Backspace":@8, @"Tab":@9, @"Enter":@13, @"Escape":@27, @"Space":@32,
+        @"Page Up":@33, @"Page Down":@34, @"End":@35, @"Home":@36, @"Left":@37, @"Up":@38,
+        @"Right":@39, @"Down":@40, @"Insert":@45, @"Delete":@46, @";":@186, @"+":@187, @"=":@187,
+        @",":@188, @"-":@189, @".":@190, @"/":@191, @"`":@192, @"[":@219, @"\\":@220,
+        @"]":@221, @"'":@222};
+    NSNumber *mapped = map[name];
+    if (mapped) return mapped.unsignedIntegerValue;
+    if (name.length == 1) return [name characterAtIndex:0];
+    if ([name hasPrefix:@"F"] && name.length <= 3) return 111 + [name substringFromIndex:1].intValue;
+    return 0;
+}
+
+static NSUInteger NPPShortcutKeyCodeForMenuKeyEquivalent(NSString *keyEquivalent) {
+    if (!keyEquivalent.length) return 0;
+    unichar key = [keyEquivalent.uppercaseString characterAtIndex:0];
+    if (key >= 0xF704 && key <= 0xF70F) return 112 + (key - 0xF704);
+    switch (key) {
+        case ';': return 186;
+        case '=': return 187;
+        case '+': return 187;
+        case ',': return 188;
+        case '-': return 189;
+        case '.': return 190;
+        case '/': return 191;
+        case '`': return 192;
+        case '[': return 219;
+        case '\\': return 220;
+        case ']': return 221;
+        case '\'': return 222;
+        default: return key;
+    }
+}
+
+static NSString *NPPMenuKeyEquivalentForShortcutKeyCode(NSUInteger keyCode) {
+    if (keyCode >= 'A' && keyCode <= 'Z')
+        return [[NSString stringWithFormat:@"%c", (char)keyCode] lowercaseString];
+    if (keyCode >= '0' && keyCode <= '9')
+        return [NSString stringWithFormat:@"%c", (char)keyCode];
+    if (keyCode >= 112 && keyCode <= 123) {
+        unichar fk = NSF1FunctionKey + (keyCode - 112);
+        return [NSString stringWithCharacters:&fk length:1];
+    }
+    switch (keyCode) {
+        case 8:   return [NSString stringWithFormat:@"%C", (unichar)NSBackspaceCharacter];
+        case 9:   return @"\t";
+        case 13:  return @"\r";
+        case 27:  return [NSString stringWithFormat:@"%C", (unichar)0x1B];
+        case 46:  return [NSString stringWithFormat:@"%C", (unichar)NSDeleteCharacter];
+        case 186: return @";";
+        case 187: return @"=";
+        case 188: return @",";
+        case 189: return @"-";
+        case 190: return @".";
+        case 191: return @"/";
+        case 192: return @"`";
+        case 219: return @"[";
+        case 220: return @"\\";
+        case 221: return @"]";
+        case 222: return @"'";
+        default:  return [[NSString stringWithFormat:@"%c", (char)keyCode] lowercaseString];
+    }
+}
 
 #pragma mark - Context menu XML parser
 
@@ -753,8 +820,12 @@ void readConfigXML(void) {
                 [ud setInteger:v.integerValue forKey:kPrefEOLType];
             if ((v = [el attributeForName:@"zoom"].stringValue))
                 [ud setInteger:v.integerValue forKey:kPrefZoomLevel];
-            if ((v = [el attributeForName:@"smoothFont"].stringValue))
-                [ud setInteger:v.integerValue forKey:kPrefFontQuality];
+            if ((v = [el attributeForName:@"smoothFont"].stringValue)) {
+                // SC_EFF_QUALITY_* is 0-3; anything else (hand-edited file)
+                // falls back to the default rather than an unlisted value.
+                NSInteger q = v.integerValue;
+                [ud setInteger:(q >= 0 && q <= 3) ? q : 3 forKey:kPrefFontQuality];
+            }
             if ((v = [el attributeForName:@"paddingLeft"].stringValue))
                 [ud setInteger:v.integerValue forKey:kPrefPaddingLeft];
             if ((v = [el attributeForName:@"paddingRight"].stringValue))
@@ -828,27 +899,9 @@ static void ensureNppDirs(void) {
         }
     }
 
-    // Copy langs.model.xml from bundle as langs.xml if user copy doesn't exist.
-    // User edits ~/Library/Application Support/Nextpad++/langs.xml to customize extensions, keywords, comment delimiters.
-    NSString *langsPath = [nppConfigDir() stringByAppendingPathComponent:@"langs.xml"];
-    if (![fm fileExistsAtPath:langsPath]) {
-        NSString *bundleCopy = [[NSBundle mainBundle] pathForResource:@"langs.model" ofType:@"xml"];
-        if (bundleCopy) {
-            [fm copyItemAtPath:bundleCopy toPath:langsPath error:nil];
-            NSLog(@"[Langs] Copied langs.model.xml as langs.xml to %@", nppConfigDir());
-        }
-    }
-
-    // Copy stylers.model.xml from bundle as stylers.xml if user copy doesn't exist.
-    // User edits ~/Library/Application Support/Nextpad++/stylers.xml to customize the Default theme styles.
-    NSString *stylersPath = [nppConfigDir() stringByAppendingPathComponent:@"stylers.xml"];
-    if (![fm fileExistsAtPath:stylersPath]) {
-        NSString *bundleCopy = [[NSBundle mainBundle] pathForResource:@"stylers.model" ofType:@"xml"];
-        if (bundleCopy) {
-            [fm copyItemAtPath:bundleCopy toPath:stylersPath error:nil];
-            NSLog(@"[Stylers] Copied stylers.model.xml as stylers.xml to %@", nppConfigDir());
-        }
-    }
+    // Copy langs.model.xml / stylers.model.xml from the bundle as langs.xml /
+    // stylers.xml if missing; merge newer model entries into existing copies.
+    NppInstallUserLangsAndStylers();
 
     // Create ~/Library/Application Support/Nextpad++/themes/ for user-installed themes (empty on first run).
     NSString *userThemesDir = [nppConfigDir() stringByAppendingPathComponent:@"themes"];
@@ -1985,10 +2038,22 @@ static void _nppTahoeRoundEditorCard(NSView *container, NSView *content) {
 - (void)menuNeedsUpdate:(NSMenu *)menu { [self.owner _populatePluginOverflowMenu:menu]; }
 @end
 
+// Named session compatibility with the independently submitted UDL/tab-colour PRs.
+@interface EditorView (NamedSessionUDL)
+- (BOOL)currentLanguageIsUDL;
+- (void)setLanguage:(NSString *)language preferUDL:(BOOL)preferUDL;
+@end
+@interface NppTabBar (NamedSessionColors)
+- (nullable NSColor *)tabCustomColorAtIndex:(NSInteger)index;
+- (void)setTabCustomColor:(NSColor *)color atIndex:(NSInteger)index;
+@end
+static constexpr int kNamedSessionBookmarkMarker=20;
+
 @implementation MainWindowController {
     TabManager       *_tabManager;
     FindReplacePanel *_findPanel;
     NSView           *_statusBar;
+    NSLayoutConstraint *_statusHeight;
     NSTextField      *_statusLeft;
     NSTextField      *_statusRight;
     NSTextField      *_gitBranchLabel;
@@ -2061,6 +2126,8 @@ static void _nppTahoeRoundEditorCard(NSView *container, NSView *content) {
 
     // Scroll synchronization
     BOOL _syncVerticalScrolling;
+    BOOL _inCloseBatch;   // -_closeEditors:inManager: is closing several tabs
+    BOOL _closingIntoClone; // -_transferEditor: closes a tab its clone replaces
     BOOL _syncHorizontalScrolling;
     intptr_t _syncColumnDelta;  // column offset between views when sync was enabled
     intptr_t _syncLineDelta;    // line offset between views when sync was enabled
@@ -2158,6 +2225,11 @@ static void _nppTahoeRoundEditorCard(NSView *container, NSView *content) {
         [[NSNotificationCenter defaultCenter]
             addObserver:self selector:@selector(_shortcutsChanged:)
                    name:NPPShortcutsChangedNotification object:nil];
+        // UDL dialog saved / renamed / created / removed a UDL: refresh the
+        // Language menu entries and the status bar's language name.
+        [[NSNotificationCenter defaultCenter]
+            addObserver:self selector:@selector(_userDefineLangsChanged:)
+                   name:UserDefineLangsDidChangeNotification object:nil];
         // (scroll sync uses a timer, not notifications)
         [self rebuildRecentFilesMenu];
         [self rebuildUDLLanguageMenu];
@@ -2985,7 +3057,7 @@ static NSDictionary<NSString *, NSString *> *_tahoeButtonDisplayNames(void) {
     [TahoeToolbarConfig setDefaultBuiltinGroups:_tahoeDefaultBuiltinGroupDicts()];
     [TahoeToolbarConfig setButtonDisplayNames:_tahoeButtonDisplayNames()];
 
-    NSArray<NSDictionary *> *model = [TahoeToolbarConfig load];
+    NSArray<NSDictionary *> *model = [TahoeToolbarConfig loadConfiguration];
     if (!model) {
         // First Tahoe use (or after Reset): defaults + current plugins, persisted.
         NSMutableArray *m = [_tahoeDefaultBuiltinGroupDicts() mutableCopy];
@@ -4241,7 +4313,7 @@ static BOOL groupHasTrailingSep(NSString *ident) {
         [_statusBar.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
         [_statusBar.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
         [_statusBar.bottomAnchor constraintEqualToAnchor:content.bottomAnchor],
-        [_statusBar.heightAnchor constraintEqualToConstant:22],
+        (_statusHeight = [_statusBar.heightAnchor constraintEqualToConstant:22]),
     ]];
 
     // Collapse secondary views and side panel initially, then restore saved panel state
@@ -4267,11 +4339,12 @@ static BOOL groupHasTrailingSep(NSString *ident) {
     ((NppDropView *)_tabManager.contentView).dropHandler = ^(NSArray<NSString *> *paths) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) return;
+        EditorView *last = nil;
         for (NSString *path in paths) {
-            [strongSelf->_tabManager openFileAtPath:path];
-            [strongSelf addToRecentFiles:path];
+            EditorView *ed = [strongSelf openFileAtPath:path];   // focuses it if open in any window
+            if (ed) last = ed;
         }
-        [strongSelf updateTitle];
+        [strongSelf _surfaceWindowOfEditor:last];
     };
 }
 
@@ -4410,6 +4483,7 @@ static BOOL groupHasTrailingSep(NSString *ident) {
         }
 
         if (ed.currentLanguage.length) info[@"language"] = ed.currentLanguage;
+        if (ed.currentLanguageIsUDL) info[@"languageIsUDL"] = @YES;
 
         // ── Cursor, selection, scroll state (matches Windows NPP session format) ──
         ScintillaView *sci = ed.scintillaView;
@@ -4437,6 +4511,19 @@ static BOOL groupHasTrailingSep(NSString *ident) {
         if (edIdx != NSNotFound) {
             NSInteger cid = [ownerMgr.tabBar tabColorAtIndex:edIdx];
             if (cid >= 0) info[@"tabColorId"] = @(cid);
+
+            // Persist custom tab color (colorId == 5) as an sRGB #RRGGBB hex string
+            if (cid == 5) {
+                NSColor *cc = [ownerMgr.tabBar tabCustomColorAtIndex:edIdx];
+                cc = [cc colorUsingColorSpace:[NSColorSpace sRGBColorSpace]] ?: cc;
+                if (cc) {
+                    NSString *hex = [NSString stringWithFormat:@"#%02X%02X%02X",
+                        (int)(cc.redComponent   * 255 + 0.5),
+                        (int)(cc.greenComponent * 255 + 0.5),
+                        (int)(cc.blueComponent  * 255 + 0.5)];
+                    info[@"tabCustomColor"] = hex;
+                }
+            }
             if ([ownerMgr.tabBar isTabPinnedAtIndex:edIdx])
                 info[@"pinned"] = @YES;
         }
@@ -4445,7 +4532,7 @@ static BOOL groupHasTrailingSep(NSString *ident) {
         {
             NSMutableArray *marks = [NSMutableArray array];
             sptr_t line = 0;
-            while ((line = [sci message:SCI_MARKERNEXT wParam:(uptr_t)line lParam:(1 << 20)]) >= 0) {
+            while ((line = [sci message:SCI_MARKERNEXT wParam:(uptr_t)line lParam:(1 << kBookmarkMarker)]) >= 0) {
                 [marks addObject:@(line)];
                 line++; // advance past this line
             }
@@ -4630,7 +4717,19 @@ static BOOL groupHasTrailingSep(NSString *ident) {
                 ed.recoveredFromName = recoveredFrom;
             [ed markAsModified];
         }
-        if (lang.length) [ed setLanguage:lang];
+        if (lang.length) {
+            // languageIsUDL tells a UDL from a built-in of the same name;
+            // older sessions lack it and keep the name-based resolution.
+            [ed setLanguage:lang preferUDL:[info[@"languageIsUDL"] boolValue]];
+            // A saved light/dark UDL variant follows the current editor
+            // theme, as on a theme change (only for a UDL claiming the file).
+            if (ed.currentLanguageIsUDL) {
+                UserDefineLangManager *udlMgr = [UserDefineLangManager shared];
+                UserDefinedLang *udl = [udlMgr languageNamed:lang];
+                UserDefinedLang *variant = udl ? [udlMgr variantOf:udl forFileName:ed.filePath.lastPathComponent] : nil;
+                if (variant && variant != udl) [ed setLanguage:variant.name preferUDL:YES];
+            }
+        }
         [_tabManager refreshCurrentTabTitle];
 
         ScintillaView *sci = ed.scintillaView;
@@ -4648,15 +4747,35 @@ static BOOL groupHasTrailingSep(NSString *ident) {
         // ── Restore per-tab color and pin state ──
         NSInteger tabIdx = (NSInteger)_tabManager.allEditors.count - 1;
         NSNumber *colorNum = info[@"tabColorId"];
-        if (colorNum)
-            [_tabManager.tabBar setTabColorAtIndex:tabIdx colorId:colorNum.integerValue];
+        if (colorNum) {
+            NSInteger cid = colorNum.integerValue;
+            [_tabManager.tabBar setTabColorAtIndex:tabIdx colorId:cid];
+
+            // Restore custom tab color (colorId == 5) from #RRGGBB hex string
+            if (cid == 5) {
+                NSString *hex = info[@"tabCustomColor"];
+                if (hex.length == 7 && [hex hasPrefix:@"#"]) {
+                    unsigned int r = 0, g = 0, b = 0;
+                    NSScanner *sc = [NSScanner scannerWithString:[hex substringFromIndex:1]];
+                    unsigned int rgb = 0;
+                    [sc scanHexInt:&rgb];
+                    r = (rgb >> 16) & 0xFF;
+                    g = (rgb >>  8) & 0xFF;
+                    b =  rgb        & 0xFF;
+                    NSColor *cc = [NSColor colorWithRed:r/255.0 green:g/255.0
+                                                  blue:b/255.0 alpha:1.0];
+                    [_tabManager.tabBar setTabCustomColor:cc atIndex:tabIdx];
+                }
+            }
+        }
         if ([info[@"pinned"] boolValue])
             [_tabManager.tabBar pinTabAtIndex:tabIdx toggle:YES];
+
 
         // ── Restore bookmarks ──
         NSArray *bookmarks = info[@"bookmarks"];
         for (NSNumber *bkLine in bookmarks)
-            [sci message:SCI_MARKERADD wParam:(uptr_t)bkLine.longLongValue lParam:20]; // kBookmarkMarker=20
+            [sci message:SCI_MARKERADD wParam:(uptr_t)bkLine.longLongValue lParam:kBookmarkMarker];
 
         // ── Restore fold state (BEFORE caret so a saved caret on a header
         // line lands consistently with the display, and any later
@@ -4922,39 +5041,148 @@ static void removeMacroFromShortcutsXML(NSString *name) {
     [xmlData writeToFile:path options:NSDataWritingAtomic error:nil];
 }
 
+- (NSDictionary *)_namedSessionStateForEditor:(EditorView *)ed {
+    ScintillaView *sci = ed.scintillaView;
+    NSMutableDictionary *info = [@{@"filePath":ed.filePath ?: @"", @"language":ed.currentLanguage ?: @"",
+        @"languageIsUDL":@([ed respondsToSelector:@selector(currentLanguageIsUDL)] && ed.currentLanguageIsUDL), @"eolMode":@([sci message:SCI_GETEOLMODE]),
+        @"firstVisibleLine":@([sci message:SCI_GETFIRSTVISIBLELINE]), @"xOffset":@([sci message:SCI_GETXOFFSET]),
+        @"selMode":@([sci message:SCI_GETSELECTIONMODE]), @"mainSelection":@([sci message:SCI_GETMAINSELECTION])} mutableCopy];
+    NSMutableArray *selections = [NSMutableArray new], *marks = [NSMutableArray new], *folds = [NSMutableArray new];
+    for (sptr_t i=0; i<[sci message:SCI_GETSELECTIONS]; i++)
+        [selections addObject:@{@"anchor":@([sci message:SCI_GETSELECTIONNANCHOR wParam:i]),
+            @"caret":@([sci message:SCI_GETSELECTIONNCARET wParam:i]),
+            @"anchorVS":@([sci message:SCI_GETSELECTIONNANCHORVIRTUALSPACE wParam:i]),
+            @"caretVS":@([sci message:SCI_GETSELECTIONNCARETVIRTUALSPACE wParam:i])}];
+    for (sptr_t line=0; (line=[sci message:SCI_MARKERNEXT wParam:line lParam:1<<kNamedSessionBookmarkMarker])>=0; line++) [marks addObject:@(line)];
+    for (sptr_t line=0; (line=[sci message:SCI_CONTRACTEDFOLDNEXT wParam:line])>=0; line++) [folds addObject:@(line)];
+    info[@"rectAnchor"]=@([sci message:SCI_GETRECTANGULARSELECTIONANCHOR]);
+    info[@"rectCaret"]=@([sci message:SCI_GETRECTANGULARSELECTIONCARET]);
+    info[@"rectAnchorVS"]=@([sci message:SCI_GETRECTANGULARSELECTIONANCHORVIRTUALSPACE]);
+    info[@"rectCaretVS"]=@([sci message:SCI_GETRECTANGULARSELECTIONCARETVIRTUALSPACE]);
+    info[@"documentID"]=[NSString stringWithFormat:@"%lld",(long long)[sci message:SCI_GETDOCPOINTER]];
+    info[@"displayName"]=ed.displayName ?: @"untitled";
+    info[@"encoding"]=[ed valueForKey:@"fileEncoding"];
+    info[@"hasBOM"]=@(ed.hasBOM);
+    info[@"modified"]=@(ed.isModified);
+    if(ed.isModified || !ed.filePath.length) info[@"content"]=[sci.string dataUsingEncoding:NSUTF8StringEncoding] ?: NSData.data;
+    info[@"selections"]=selections; info[@"bookmarks"]=marks; info[@"folds"]=folds;
+    return info;
+}
+
+- (void)_applyNamedSessionState:(NSDictionary *)info editor:(EditorView *)ed {
+    if ([info[@"language"] isKindOfClass:NSString.class]) {
+        if ([ed respondsToSelector:@selector(setLanguage:preferUDL:)])
+            [ed setLanguage:info[@"language"] preferUDL:[info[@"languageIsUDL"] boolValue]];
+        else [ed setLanguage:info[@"language"]];
+    }
+    if(info[@"encoding"] && ([[ed valueForKey:@"fileEncoding"] unsignedIntegerValue]!=[info[@"encoding"] unsignedIntegerValue] || ed.hasBOM!=[info[@"hasBOM"] boolValue]))
+        [ed setFileEncoding:[info[@"encoding"] unsignedIntegerValue] hasBOM:[info[@"hasBOM"] boolValue]];
+    ScintillaView *sci=ed.scintillaView;
+    if (info[@"eolMode"]) [sci message:SCI_SETEOLMODE wParam:MAX(0,MIN(2,[info[@"eolMode"] integerValue]))];
+    [sci message:SCI_MARKERDELETEALL wParam:kNamedSessionBookmarkMarker];
+    sptr_t lines=[sci message:SCI_GETLINECOUNT], length=[sci message:SCI_GETLENGTH];
+    for (NSNumber *line in info[@"bookmarks"]) if (line.longLongValue>=0 && line.longLongValue<lines)
+        [sci message:SCI_MARKERADD wParam:line.longLongValue lParam:kNamedSessionBookmarkMarker];
+    [sci message:SCI_COLOURISE wParam:0 lParam:-1];
+    [sci message:SCI_FOLDALL wParam:SC_FOLDACTION_EXPAND];
+    for (NSNumber *line in info[@"folds"]) if (line.longLongValue>=0 && line.longLongValue<lines)
+        [sci message:SCI_FOLDLINE wParam:line.longLongValue lParam:SC_FOLDACTION_CONTRACT];
+    NSArray *selections=info[@"selections"];
+    if ([selections isKindOfClass:NSArray.class] && selections.count) {
+        NSUInteger i=0;
+        [sci message:SCI_CLEARSELECTIONS];
+        for (NSDictionary *selection in selections) {
+            sptr_t anchor=MAX(0,MIN(length,[selection[@"anchor"] longLongValue]));
+            sptr_t caret=MAX(0,MIN(length,[selection[@"caret"] longLongValue]));
+            [sci message:i?SCI_ADDSELECTION:SCI_SETSELECTION wParam:caret lParam:anchor];
+            [sci message:SCI_SETSELECTIONNANCHORVIRTUALSPACE wParam:i lParam:[selection[@"anchorVS"] longLongValue]];
+            [sci message:SCI_SETSELECTIONNCARETVIRTUALSPACE wParam:i lParam:[selection[@"caretVS"] longLongValue]];
+            i++;
+        }
+        [sci message:SCI_SETMAINSELECTION wParam:MIN(i-1,[info[@"mainSelection"] unsignedIntegerValue])];
+        [sci message:SCI_SETSELECTIONMODE wParam:[info[@"selMode"] integerValue]];
+        if([info[@"selMode"] integerValue]==SC_SEL_RECTANGLE && info[@"rectAnchor"]) {
+            [sci message:SCI_SETRECTANGULARSELECTIONANCHOR wParam:MIN(length,[info[@"rectAnchor"] unsignedIntegerValue])];
+            [sci message:SCI_SETRECTANGULARSELECTIONCARET wParam:MIN(length,[info[@"rectCaret"] unsignedIntegerValue])];
+            [sci message:SCI_SETRECTANGULARSELECTIONANCHORVIRTUALSPACE wParam:[info[@"rectAnchorVS"] unsignedIntegerValue]];
+            [sci message:SCI_SETRECTANGULARSELECTIONCARETVIRTUALSPACE wParam:[info[@"rectCaretVS"] unsignedIntegerValue]];
+        }
+    } else if (info[@"cursorLine"]) [ed goToLineNumber:[info[@"cursorLine"] integerValue]];
+    [sci message:SCI_SETFIRSTVISIBLELINE wParam:MAX(0,[info[@"firstVisibleLine"] longLongValue])];
+    [sci message:SCI_SETXOFFSET wParam:MAX(0,[info[@"xOffset"] longLongValue])];
+}
+
 - (void)loadSessionFromPath:(NSString *)path {
-    NSDictionary *session = [NSDictionary dictionaryWithContentsOfFile:path];
-    NSArray<NSDictionary *> *tabs = session[@"tabs"];
-    if (!tabs.count) {
-        NSAlert *a = [[NSAlert alloc] init];
-        a.messageText = [[NppLocalizer shared] translate:@"Empty Session"];
-        a.informativeText = [[NppLocalizer shared] translate:@"The selected session file contains no tabs."];
-        [a runModal];
-        return;
-    }
-    NSFileManager *fm = [NSFileManager defaultManager];
+    NSDictionary *session=[NSDictionary dictionaryWithContentsOfFile:path];
+    NSArray *tabs=session[@"tabs"];
+    if (![tabs isKindOfClass:NSArray.class]) return;
+    EditorView *selected=nil;
+    NSMutableDictionary<NSString *,EditorView *> *restored=[NSMutableDictionary new];
     for (NSDictionary *info in tabs) {
-        NSString *filePath = info[@"filePath"];
-        if (filePath && [fm fileExistsAtPath:filePath])
-            [self openFileAtPath:filePath];
+        if(![info isKindOfClass:NSDictionary.class]) continue;
+        NSString *file=[info[@"filePath"] isKindOfClass:NSString.class]?info[@"filePath"]:@"";
+        NSData *content=[info[@"content"] isKindOfClass:NSData.class]?info[@"content"]:nil;
+        BOOL onDisk=file.length && [[NSFileManager defaultManager] fileExistsAtPath:file];
+        if(!onDisk && !content) continue;
+        TabManager *mgr=[info[@"view"] isEqual:@"V"]?_subTabManagerV:[info[@"view"] isEqual:@"H"]?_subTabManagerH:_tabManager;
+        NSString *documentID=[info[@"documentID"] isKindOfClass:NSString.class]?info[@"documentID"]:nil;
+        EditorView *source=documentID?restored[documentID]:nil,*ed=nil;
+        if(source) {
+            if([mgr.allEditors containsObject:source]) ed=source;
+            else { ed=[mgr addNewTab]; [ed shareDocumentFrom:source]; }
+        } else {
+            for(EditorView *candidate in mgr.allEditors) if(file.length && [candidate.filePath isEqual:file]) { ed=candidate;break; }
+            // Never replace a different unsaved buffer with an older snapshot.
+            BOOL conflict=ed.isModified && content && ![[ed.scintillaView.string dataUsingEncoding:NSUTF8StringEncoding] isEqual:content];
+            if(conflict) ed=nil;
+            if(!ed) ed=onDisk && !conflict?[mgr openFileAtPath:file]:[mgr addNewTab];
+            if(!ed) continue;
+            if(!ed.filePath.length) ed.customTabName=info[@"displayName"] ?: file.lastPathComponent;
+            if(content && ![[ed.scintillaView.string dataUsingEncoding:NSUTF8StringEncoding] isEqual:content]) {
+                [ed.scintillaView message:SCI_CLEARALL];
+                [ed.scintillaView message:SCI_ADDTEXT wParam:content.length lParam:(sptr_t)content.bytes];
+                [ed markAsModified];
+            }
+            if(documentID) restored[documentID]=ed;
+        }
+        [self _applyNamedSessionState:info editor:ed];
+        NSInteger idx=[mgr.allEditors indexOfObject:ed];
+        if (info[@"tabColorId"]) [mgr.tabBar setTabColorAtIndex:idx colorId:[info[@"tabColorId"] integerValue]];
+        NSArray *rgb=info[@"tabCustomColor"];
+        if([rgb isKindOfClass:NSArray.class] && rgb.count==4 && [mgr.tabBar respondsToSelector:@selector(setTabCustomColor:atIndex:)])
+            [mgr.tabBar setTabCustomColor:[NSColor colorWithSRGBRed:[rgb[0] doubleValue] green:[rgb[1] doubleValue] blue:[rgb[2] doubleValue] alpha:[rgb[3] doubleValue]] atIndex:idx];
+        if (info[@"pinned"] && [mgr.tabBar isTabPinnedAtIndex:idx] != [info[@"pinned"] boolValue]) [mgr.tabBar pinTabAtIndex:idx toggle:YES];
+        if ([info[@"paneSelected"] boolValue] || [info[@"selected"] boolValue]) [mgr selectTabAtIndex:idx];
+        if ([info[@"selected"] boolValue]) selected=ed;
+        if (mgr==_subTabManagerV) [self _ensureVerticalViewVisible];
+        if (mgr==_subTabManagerH) [self _ensureHorizontalViewVisible];
+        [mgr refreshAllTabTitles];
     }
+    if (selected) [self.window makeFirstResponder:selected.scintillaView];
+    [self updateStatusBar];
 }
 
 - (void)saveSessionToPath:(NSString *)path {
-    NSMutableArray *tabs = [NSMutableArray array];
-    for (EditorView *ed in _tabManager.allEditors) {
-        if (!ed.filePath) continue;
-        NSMutableDictionary *info = [NSMutableDictionary dictionary];
-        info[@"filePath"] = ed.filePath;
-        if (ed.currentLanguage.length) info[@"language"] = ed.currentLanguage;
-        info[@"cursorLine"] = @(ed.cursorLine);
+    NSMutableArray *tabs=[NSMutableArray new];
+    for (TabManager *mgr in [self sessionTabManagers]) for (EditorView *ed in mgr.allEditors) {
+        NSMutableDictionary *info=[[self _namedSessionStateForEditor:ed] mutableCopy];
+        info[@"view"]=mgr==_subTabManagerV?@"V":mgr==_subTabManagerH?@"H":@"main";
+        info[@"selected"]=@(ed==[self currentEditor]);
+        info[@"paneSelected"]=@(ed==mgr.currentEditor);
+        NSUInteger idx=[mgr.allEditors indexOfObject:ed];
+        info[@"tabColorId"]=@([mgr.tabBar tabColorAtIndex:idx]);
+        if([mgr.tabBar respondsToSelector:@selector(tabCustomColorAtIndex:)]) {
+            NSColor *rgb=[[mgr.tabBar tabCustomColorAtIndex:idx] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+            if(rgb) info[@"tabCustomColor"]=@[@(rgb.redComponent),@(rgb.greenComponent),@(rgb.blueComponent),@(rgb.alphaComponent)];
+        }
+        info[@"pinned"]=@([mgr.tabBar isTabPinnedAtIndex:idx]);
         [tabs addObject:info];
     }
-    NSDictionary *session = @{
-        @"tabs": tabs,
-        @"selectedIndex": @(_tabManager.tabBar.selectedIndex)
-    };
-    [session writeToFile:path atomically:YES];
+    NSError *error=nil;
+    NSData *data=[NSPropertyListSerialization dataWithPropertyList:@{@"version":@3,@"tabs":tabs} format:NSPropertyListXMLFormat_v1_0 options:0 error:&error];
+    if (!data || ![data writeToFile:path options:NSDataWritingAtomic error:&error]) {
+        NSAlert *alert=[NSAlert alertWithError:error]; [alert runModal];
+    }
 }
 
 - (void)loadSession:(id)sender {
@@ -5055,10 +5283,51 @@ static void removeMacroFromShortcutsXML(NSString *name) {
 
 #pragma mark - Public
 
-- (void)openFileAtPath:(NSString *)path {
-    [_tabManager openFileAtPath:path];
+- (EditorView *)openFileAtPath:(NSString *)path {
+    EditorView *ed = [self _focusEditorForOpenPath:path];
+    if (!ed) ed = [_tabManager openFileAtPath:path];
     [self addToRecentFiles:path];
     [self updateTitle];
+    return ed;
+}
+
+/// After opening several files (some may already have been open in other
+/// windows, which each brought their window forward), bring forward the window
+/// that shows the LAST of them, so the batch ends where it finished.
+- (void)_surfaceWindowOfEditor:(nullable EditorView *)ed {
+    id owner = ed.window.windowController;
+    if ([owner isKindOfClass:[MainWindowController class]]) {
+        MainWindowController *mwc = (MainWindowController *)owner;
+        if (!mwc.window.isKeyWindow) [mwc bringWindowForward];
+    }
+}
+
+/// If `path` is already open in this window (any pane) or another window,
+/// select that tab, bring its window forward when it is not this one, and
+/// return its editor. With tabs movable between windows a file must not end
+/// up with a second, diverging buffer just because it is open elsewhere.
+- (nullable EditorView *)_focusEditorForOpenPath:(NSString *)path {
+    if (!path.length) return nil;
+    NSString *want = path.stringByStandardizingPath;
+    NSMutableArray<MainWindowController *> *controllers = [NSMutableArray arrayWithObject:self];
+    id appDel = NSApp.delegate;
+    if ([appDel isKindOfClass:[AppDelegate class]])
+        for (MainWindowController *mwc in [(AppDelegate *)appDel windowControllers])
+            if (mwc != self && !mwc.windowHasClosed) [controllers addObject:mwc];
+
+    for (MainWindowController *mwc in controllers) {
+        for (TabManager *mgr in [mwc sessionTabManagers]) {
+            NSArray<EditorView *> *eds = mgr.allEditors;
+            for (NSInteger i = 0; i < (NSInteger)eds.count; i++) {
+                NSString *have = eds[i].filePath;
+                if (!have || ![have.stringByStandardizingPath isEqualToString:want]) continue;
+                [mgr selectTabAtIndex:i];
+                if (mwc != self) [mwc bringWindowForward];
+                return eds[i];
+            }
+        }
+    }
+    return nil;
 }
 
 // Issue #63: macOS routes Finder "Open With…" / drag-drop / double-click
@@ -5091,6 +5360,7 @@ static void removeMacroFromShortcutsXML(NSString *name) {
     NSMutableArray *recents = [([ud stringArrayForKey:@"RecentFiles"] ?: @[]) mutableCopy];
     [recents removeObject:path];
     [recents insertObject:path atIndex:0];
+    [self _forgetClosedFile:path];  // open again: no longer a closed file
     if (recents.count > 15) [recents removeLastObject];
     [ud setObject:recents forKey:@"RecentFiles"];
     [self rebuildRecentFilesMenu];
@@ -5129,14 +5399,195 @@ static void removeMacroFromShortcutsXML(NSString *name) {
         [a runModal];
         return;
     }
-    [_tabManager openFileAtPath:path];
-    [self addToRecentFiles:path]; // move to top
-    [self updateTitle];
+    [self openFileAtPath:path];   // also moves it to the top of the recent list
 }
 
 - (void)clearRecentFiles:(id)sender {
     [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"RecentFiles"];
+    [self _clearClosedFiles];  // Windows keeps both in one list
     [self rebuildRecentFilesMenu];
+}
+
+#pragma mark - Restore Recent Closed File
+
+// Windows (IDM_FILE_RESTORELASTCLOSEDFILE) reopens the head of its recent-files
+// list, which only ever holds closed files. Open Recent here also lists files
+// that are still open, so closed tabs get a stack of their own. It is app-wide,
+// not per window, so the tabs of a window that was closed can still come back,
+// and it lives in memory only: open tabs already survive a relaunch through the
+// session. Untitled tabs are never recorded; like Windows, there is no path to
+// reopen. As on Windows, opening a file drops it from the stack.
+static const NSUInteger kClosedFileStackMax = 30;
+
+static NSMutableArray<NSDictionary *> *closedFileStack(void) {
+    static NSMutableArray<NSDictionary *> *stack;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ stack = [NSMutableArray array]; });
+    return stack;
+}
+
+- (void)_forgetClosedFile:(NSString *)path {
+    NSMutableArray<NSDictionary *> *stack = closedFileStack();
+    [stack removeObjectsAtIndexes:[stack indexesOfObjectsPassingTest:^BOOL(NSDictionary *e, NSUInteger i, BOOL *stop) {
+        return [e[@"filePath"] isEqualToString:path];
+    }]];
+}
+
+- (void)_clearClosedFiles { [closedFileStack() removeAllObjects]; }
+
+/// Push `ed` (about to close, owned by `mgr`) onto the closed-file stack with
+/// the view state needed to put it back where it was.
+- (void)_recordClosedEditor:(EditorView *)ed inManager:(TabManager *)mgr {
+    NSString *path = ed.filePath;
+    if (!path.length) return;
+
+    ScintillaView *sci = ed.scintillaView;
+    NSMutableDictionary *entry = [NSMutableDictionary dictionary];
+    entry[@"filePath"]         = path;
+    entry[@"view"]             = mgr == _subTabManagerV ? @"V" : mgr == _subTabManagerH ? @"H" : @"main";
+    entry[@"language"]         = ed.currentLanguage ?: @"";
+    entry[@"startPos"]         = @([sci message:SCI_GETANCHOR]);
+    entry[@"endPos"]           = @([sci message:SCI_GETCURRENTPOS]);
+    entry[@"selMode"]          = @([sci message:SCI_GETSELECTIONMODE]);
+    entry[@"firstVisibleLine"] = @([sci message:SCI_GETFIRSTVISIBLELINE]);
+    entry[@"xOffset"]          = @([sci message:SCI_GETXOFFSET]);
+    // Only a buffer that matches the disk says how to read the file. With unsaved
+    // changes being discarded, a Set/Convert encoding may describe bytes that were
+    // never written. The file's date and size let the restore tell whether those
+    // bytes are still the ones on disk.
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+    if (!ed.isModified && !ed.largeFileMode && attrs.fileModificationDate) {
+        entry[@"encoding"] = @(ed.fileEncoding);
+        entry[@"hasBOM"]   = @(ed.hasBOM);
+        entry[@"fileDate"] = attrs.fileModificationDate;
+        entry[@"fileSize"] = @(attrs.fileSize);
+    }
+
+    [self _forgetClosedFile:path];
+    NSMutableArray<NSDictionary *> *stack = closedFileStack();
+    [stack addObject:entry];
+    if (stack.count > kClosedFileStackMax) [stack removeObjectAtIndex:0];
+}
+
+- (void)tabManager:(id)tabManager willCloseEditor:(EditorView *)editor {
+    // A clone still open in the other view keeps the document open. A batch
+    // run closing the files it processed is not the user closing tabs.
+    if (editor.cloneSibling || _suppressClosedFileRecording) return;
+    [self _recordClosedEditor:editor inManager:tabManager];
+}
+
+/// Record every tab of this window as it closes. A clone pair is recorded once,
+/// from the view met first (primary before secondary), and the active tab goes
+/// last so it is the first to come back.
+- (void)_recordClosedTabsOfWindow {
+    EditorView *active = [self currentEditor];
+    TabManager *activeMgr = nil;
+    NSMapTable<EditorView *, TabManager *> *recorded = [NSMapTable strongToStrongObjectsMapTable];
+    for (TabManager *mgr in [self sessionTabManagers]) {
+        for (EditorView *ed in mgr.allEditors) {
+            if (ed == active) { activeMgr = mgr; continue; }
+            if (ed.cloneSibling && ([recorded objectForKey:ed.cloneSibling] || ed.cloneSibling == active)) continue;
+            [self _recordClosedEditor:ed inManager:mgr];
+            [recorded setObject:mgr forKey:ed];
+        }
+    }
+    if (!activeMgr) return;
+    TabManager *siblingMgr = active.cloneSibling ? [recorded objectForKey:active.cloneSibling] : nil;
+    if (siblingMgr) [self _recordClosedEditor:active.cloneSibling inManager:siblingMgr];
+    else            [self _recordClosedEditor:active inManager:activeMgr];
+}
+
+/// Paths of every file open in a live window.
+- (NSSet<NSString *> *)_openFilePaths {
+    NSMutableSet<NSString *> *paths = [NSMutableSet set];
+    for (MainWindowController *mwc in [self _sessionContributingControllers])
+        for (TabManager *mgr in [mwc sessionTabManagers])
+            for (EditorView *ed in mgr.allEditors)
+                if (ed.filePath) [paths addObject:ed.filePath];
+    return paths;
+}
+
+/// Menu validation runs often, so no disk access here: an entry whose file has
+/// gone is skipped when the command runs.
+- (BOOL)_hasRestorableClosedFile {
+    NSArray<NSDictionary *> *stack = closedFileStack();
+    if (stack.count == 0) return NO;
+    NSSet<NSString *> *open = [self _openFilePaths];
+    for (NSDictionary *e in stack)
+        if (![open containsObject:e[@"filePath"]]) return YES;
+    return NO;
+}
+
+- (void)_applyClosedFileState:(NSDictionary *)entry toEditor:(EditorView *)ed {
+    // Reapply the encoding only to the same bytes it was chosen for, and never
+    // over one the fresh load read from a BOM. reloadWithEncoding: does not
+    // validate the decode and leaves the buffer clean, so a wrong guess here
+    // would be written back by the next save.
+    NSNumber *enc = entry[@"encoding"];
+    BOOL bom = [entry[@"hasBOM"] boolValue];
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:ed.filePath error:nil];
+    BOOL unchanged = attrs && [attrs.fileModificationDate isEqualToDate:entry[@"fileDate"]] &&
+                     attrs.fileSize == [entry[@"fileSize"] unsignedLongLongValue];
+    if (enc && unchanged && !ed.largeFileMode && !ed.hasBOM &&
+        (enc.unsignedIntegerValue != ed.fileEncoding || bom != ed.hasBOM))
+        [ed reloadWithEncoding:enc.unsignedIntegerValue hasBOM:bom error:nil];
+
+    NSString *lang = entry[@"language"];
+    if (lang && ![lang isEqualToString:ed.currentLanguage ?: @""]) [ed setLanguage:lang];
+
+    // Same order as the session restore: selection, then scroll, so the saved
+    // first visible line wins over the scroll ENSUREVISIBLE causes. Clamped in
+    // case the file changed on disk since it was closed.
+    ScintillaView *sci = ed.scintillaView;
+    sptr_t docLen = [sci message:SCI_GETLENGTH];
+    sptr_t anchor = MAX((sptr_t)0, MIN((sptr_t)[entry[@"startPos"] longLongValue], docLen));
+    sptr_t caret  = MAX((sptr_t)0, MIN((sptr_t)[entry[@"endPos"] longLongValue],   docLen));
+    NSInteger selMode = [entry[@"selMode"] integerValue];
+    if (selMode > 0)
+        [sci message:SCI_SETSELECTIONMODE wParam:(uptr_t)selMode];
+    [sci message:SCI_SETSEL wParam:(uptr_t)anchor lParam:caret];
+    sptr_t caretLine = [sci message:SCI_LINEFROMPOSITION wParam:(uptr_t)caret];
+    [sci message:SCI_ENSUREVISIBLEENFORCEPOLICY wParam:(uptr_t)caretLine];
+    [sci message:SCI_SETXOFFSET wParam:(uptr_t)[entry[@"xOffset"] longLongValue]];
+    [sci message:SCI_SETFIRSTVISIBLELINE wParam:(uptr_t)[entry[@"firstVisibleLine"] longLongValue]];
+}
+
+/// File > Restore Recent Closed File: reopen the most recently closed file tab
+/// with its view state. Entries whose file is gone or already open are dropped
+/// on the way.
+- (void)restoreRecentClosedFile:(id)sender {
+    NSMutableArray<NSDictionary *> *stack = closedFileStack();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSSet<NSString *> *open = [self _openFilePaths];
+    while (stack.count) {
+        NSDictionary *entry = stack.lastObject;
+        [stack removeLastObject];
+        NSString *path = entry[@"filePath"];
+        if ([open containsObject:path]) continue;
+        BOOL isDir = NO;
+        if (![fm fileExistsAtPath:path isDirectory:&isDir] || isDir) continue;
+
+        // Back to the secondary view it came from, unless the other split
+        // orientation is in use (the two are mutually exclusive).
+        NSString *view = entry[@"view"];
+        TabManager *mgr = _tabManager;
+        if ([view isEqualToString:@"V"] && _subTabManagerV && _subTabManagerH.allEditors.count == 0)
+            mgr = _subTabManagerV;
+        else if ([view isEqualToString:@"H"] && _subTabManagerH && _subTabManagerV.allEditors.count == 0)
+            mgr = _subTabManagerH;
+
+        EditorView *ed = [mgr openFileAtPath:path];
+        if (!ed) return;  // load failed; TabManager already showed the error
+        if (mgr == _subTabManagerV)      [self _ensureVerticalViewVisible];
+        else if (mgr == _subTabManagerH) [self _ensureHorizontalViewVisible];
+
+        [self _applyClosedFileState:entry toEditor:ed];
+        [mgr refreshTitleForEditor:ed];
+        [self addToRecentFiles:path];
+        [self updateTitle];
+        [self updateStatusBar];
+        return;
+    }
 }
 
 #pragma mark - File menu actions
@@ -5152,11 +5603,14 @@ static void removeMacroFromShortcutsXML(NSString *name) {
     panel.canChooseFiles = YES;
     panel.canChooseDirectories = NO;
     [panel beginWithCompletionHandler:^(NSModalResponse r) {
-        if (r == NSModalResponseOK)
+        if (r == NSModalResponseOK) {
+            EditorView *last = nil;
             for (NSURL *u in panel.URLs) {
-                [self->_tabManager openFileAtPath:u.path];
-                [self addToRecentFiles:u.path];
+                EditorView *ed = [self openFileAtPath:u.path];
+                if (ed) last = ed;
             }
+            [self _surfaceWindowOfEditor:last];
+        }
         [self updateTitle];
     }];
 }
@@ -5641,7 +6095,7 @@ static NSArray<NSDictionary *> *convertRecordedToXmlFormat(NSArray<NSDictionary 
         for (int i = 1; i <= 12; i++) [keys addObject:[NSString stringWithFormat:@"F%d", i]];
         [keys addObjectsFromArray:@[@"Backspace", @"Tab", @"Enter", @"Escape", @"Space",
             @"Page Up", @"Page Down", @"End", @"Home", @"Left", @"Up", @"Right", @"Down",
-            @"Insert", @"Delete", @";", @"=", @",", @"-", @".", @"/", @"`", @"[", @"\\", @"]", @"'"]];
+            @"Insert", @"Delete", @";", @"+", @"=", @",", @"-", @".", @"/", @"`", @"[", @"\\", @"]", @"'"]];
         [keyPopup addItemsWithTitles:keys];
     }
     [cv addSubview:keyPopup];
@@ -5690,9 +6144,7 @@ static NSArray<NSDictionary *> *convertRecordedToXmlFormat(NSArray<NSDictionary 
             btnOK.enabled = YES;          // no key → no possible conflict
             return;
         }
-        NSUInteger keyCode = 0;
-        if (keyName.length == 1) keyCode = [keyName characterAtIndex:0];
-        else if ([keyName hasPrefix:@"F"]) keyCode = 111 + [keyName substringFromIndex:1].intValue;
+        NSUInteger keyCode = NPPShortcutKeyCodeForPopupName(keyName);
         if (keyCode == 0) {
             conflictLabel.stringValue = @"";
             btnOK.enabled = YES;
@@ -5711,8 +6163,7 @@ static NSArray<NSDictionary *> *convertRecordedToXmlFormat(NSArray<NSDictionary 
                 BOOL mCtrl = (m & NSEventModifierFlagControl) != 0;
                 BOOL mAlt = (m & NSEventModifierFlagOption) != 0;
                 BOOL mShift = (m & NSEventModifierFlagShift) != 0;
-                unichar mKey = [mi.keyEquivalent.uppercaseString characterAtIndex:0];
-                if (mKey >= 0xF704 && mKey <= 0xF70F) mKey = 112 + (mKey - 0xF704);
+                NSUInteger mKey = NPPShortcutKeyCodeForMenuKeyEquivalent(mi.keyEquivalent);
                 if (mKey == keyCode &&
                     mCmd == (chkCmd.state == NSControlStateValueOn) &&
                     mCtrl == (chkCtrl.state == NSControlStateValueOn) &&
@@ -5781,13 +6232,8 @@ static NSArray<NSDictionary *> *convertRecordedToXmlFormat(NSArray<NSDictionary 
     BOOL macroCtrl  = (chkCtrl.state == NSControlStateValueOn);
     BOOL macroAlt   = (chkOpt.state == NSControlStateValueOn);
     BOOL macroShift = (chkShift.state == NSControlStateValueOn);
-    NSUInteger macroKeyCode = 0;
     NSString *keyName = keyPopup.titleOfSelectedItem;
-    if (keyName.length == 1) {
-        macroKeyCode = [keyName characterAtIndex:0]; // 'A'-'Z' or '0'-'9'
-    } else if ([keyName hasPrefix:@"F"]) {
-        macroKeyCode = 111 + [keyName substringFromIndex:1].intValue; // F1=112..F12=123
-    }
+    NSUInteger macroKeyCode = NPPShortcutKeyCodeForPopupName(keyName);
 
     ensureNppDirs();
     // Insert macro into shortcuts.xml in-place (preserves rest of file)
@@ -5902,7 +6348,9 @@ static NSArray<NSDictionary *> *convertRecordedToXmlFormat(NSArray<NSDictionary 
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:name
                                                       action:@selector(_runSavedCommand:)
                                                keyEquivalent:@""];
-        item.target = self;
+        // No fixed target: the shared main menu is rebuilt by every window,
+        // so the action goes down the responder chain to the key window.
+        item.target = nil;
         item.representedObject = cmdText;
         item.tag = 9910;
 
@@ -6165,12 +6613,17 @@ static NSArray<NSDictionary *> *convertRecordedToXmlFormat(NSArray<NSDictionary 
 
 // The tab color for a document (matching the colored tab), found in whichever
 // view owns the editor. nil when the tab has no custom color.
+// Added cid == 5 for custom colors (Refine: tab color display in document list)
+// and 1-4 holds the predefined colors (Refine: color tabs)
 - (NSColor *)documentListPanel:(DocumentListPanel *)panel backgroundColorForEditor:(EditorView *)editor {
     for (TabManager *mgr in @[_tabManager, _subTabManagerH, _subTabManagerV]) {
         if (!mgr) continue;
         NSUInteger idx = [mgr.allEditors indexOfObject:editor];
-        if (idx != NSNotFound)
-            return [NppTabBar tabFillColorForId:[mgr.tabBar tabColorAtIndex:(NSInteger)idx]];
+        if (idx != NSNotFound) {
+            NSInteger cid = [mgr.tabBar tabColorAtIndex:(NSInteger)idx];
+            if (cid == 5) return [mgr.tabBar tabCustomColorAtIndex:(NSInteger)idx];
+            return [NppTabBar tabFillColorForId:cid];
+        }
     }
     return nil;
 }
@@ -6391,17 +6844,20 @@ static NSArray<NSDictionary *> *convertRecordedToXmlFormat(NSArray<NSDictionary 
     [self updateTitle];
 }
 
+/// The Scintilla document `ed` shows (shared by an editor and its clone).
+static sptr_t NppDocumentOf(EditorView *ed) {
+    return ed ? [ed.scintillaView message:SCI_GETDOCPOINTER] : 0;
+}
+
 // Clone: share the same Scintilla document in the other view.
 // Both views stay in sync — edits in one appear in the other.
 - (void)_cloneEditor:(EditorView *)ed toVertical:(BOOL)vertical {
     if (!ed) return;
     TabManager *sub = vertical ? _subTabManagerV : _subTabManagerH;
-    EditorView *clone = [sub addNewTab];
-    [clone shareDocumentFrom:ed];
-    [sub refreshCurrentTabTitle];
-    if (vertical) [self _ensureVerticalViewVisible];
-    else          [self _ensureHorizontalViewVisible];
-    [self updateTitle];
+    // Like the move above (and Windows' Clone to Other View): a tab that is
+    // already in the split pane clones into the primary one.
+    TabManager *dst = ([self _managerOwningEditor:ed] == sub) ? _tabManager : sub;
+    [self _cloneEditor:ed into:dst ofController:self atIndex:NSIntegerMax];
 }
 
 - (void)moveToOtherVerticalView:(id)sender {
@@ -6444,6 +6900,405 @@ static NSArray<NSDictionary *> *convertRecordedToXmlFormat(NSArray<NSDictionary 
     }
 
     [self updateTitle];
+}
+
+#pragma mark - Tab tear-off / Move to New Window
+
+// A tab dragged off its tab bar goes where Windows Notepad++ sends it
+// (TCN_TABDROPPEDOUTSIDE), with Option standing in for Ctrl:
+//  - onto its own pane's text area: a menu offers Move/Clone to Other View;
+//  - onto another pane's tab bar or text area, in this window or another:
+//    it moves there (Option: a clone opens there);
+//  - anywhere else in one of this app's windows: nothing happens;
+//  - outside every window: a new window opens holding it (Option: a clone).
+// "Move to New Window" in the tab menu also opens a new window. A moved tab
+// is the SAME EditorView
+// object moves, exactly as "Move to Other View" moves it between panes: the
+// buffer, undo history, unsaved changes, encoding, language, bookmarks, file
+// monitoring and backup file all travel with it, and nothing is reloaded from
+// disk. A cloned editor keeps sharing its document with its sibling, even
+// across windows.
+//
+// Session and backups need no extra bookkeeping: the session is written from
+// every live window's tab managers and each window's autosave timer walks its
+// own managers, so a moved editor is saved and backed up exactly once, by the
+// window it now lives in.
+
+/// Horizontal offset (pt) from the tab bar's left edge to where a torn-off
+/// tab's new window puts the pointer: roughly the middle of the first tab.
+static const CGFloat kTearOffGrabX = 60.0;
+/// Torn off from a full-screen window: distance (pt) from the pointer up to
+/// the new window's top edge (title bar plus toolbar above the tab bar).
+static const CGFloat kTearOffFullScreenTopGap = 90.0;
+
+/// `frame` shrunk to fit `screen`'s usable area and moved fully onto it.
+- (NSRect)_frame:(NSRect)frame fittedToScreen:(NSScreen *)screen {
+    NSRect vis = screen.visibleFrame;
+    frame.size.width  = MIN(frame.size.width,  NSWidth(vis));
+    frame.size.height = MIN(frame.size.height, NSHeight(vis));
+    frame.origin.x = MAX(NSMinX(vis), MIN(frame.origin.x, NSMaxX(vis) - NSWidth(frame)));
+    frame.origin.y = MAX(NSMinY(vis), MIN(frame.origin.y, NSMaxY(vis) - NSHeight(frame)));
+    return frame;
+}
+
+- (NSInteger)_totalEditorCount {
+    NSInteger n = 0;
+    for (TabManager *mgr in [self sessionTabManagers]) n += (NSInteger)mgr.allEditors.count;
+    return n;
+}
+
+- (nullable TabManager *)_managerOwningEditor:(EditorView *)ed {
+    for (TabManager *mgr in [self sessionTabManagers])
+        if ([mgr.allEditors containsObject:ed]) return mgr;
+    return nil;
+}
+
+/// YES when another window is open, i.e. closing this one would not quit.
+- (BOOL)_hasOtherLiveWindow {
+    id appDel = NSApp.delegate;
+    if (![appDel isKindOfClass:[AppDelegate class]]) return NO;
+    for (MainWindowController *mwc in [(AppDelegate *)appDel windowControllers])
+        if (mwc != self && !mwc.windowHasClosed) return YES;
+    return NO;
+}
+
+- (void)moveToNewWindow:(id)sender {
+    EditorView *ed = [self currentEditor];
+    if (!ed || [self _totalEditorCount] < 2) { NSBeep(); return; }
+    [self _moveEditor:ed toNewWindowAtScreenPoint:NSZeroPoint placeAtPoint:NO];
+}
+
+typedef NS_ENUM(NSInteger, NppTabDrop) {
+    NppTabDropNone,        // over this app's chrome: nothing happens
+    NppTabDropOwnPane,     // over the tab's own pane's text area: offer a menu
+    NppTabDropOtherPane,   // over another pane's text area (any window)
+    NppTabDropNewWindow,   // outside every window of this app
+};
+
+/// Where a tab dragged out of `src` and released at `sp` (away from every tab
+/// bar) goes. For NppTabDropOtherPane, `*outPane` and `*outMWC` name the pane.
+- (NppTabDrop)_tabDropAtScreenPoint:(NSPoint)sp source:(TabManager *)src
+                               pane:(TabManager * __strong *)outPane
+                         controller:(MainWindowController * __strong *)outMWC {
+    // The window under the pointer, looking beneath the click-through drag
+    // ghost that floats there while the tab is being dragged.
+    NSInteger num = [NSWindow windowNumberAtPoint:sp belowWindowWithWindowNumber:0];
+    NSWindow *win = [NSApp windowWithWindowNumber:num];
+    for (int i = 0; i < 4 && win.ignoresMouseEvents; i++) {
+        num = [NSWindow windowNumberAtPoint:sp belowWindowWithWindowNumber:num];
+        win = [NSApp windowWithWindowNumber:num];
+    }
+    if (!win) return NppTabDropNewWindow;     // the desktop or another app
+
+    MainWindowController *mwc = nil;
+    id appDel = NSApp.delegate;
+    if ([appDel isKindOfClass:[AppDelegate class]])
+        for (MainWindowController *c in [(AppDelegate *)appDel windowControllers])
+            if (c.window == win && !c.windowHasClosed) { mwc = c; break; }
+    if (!mwc) return NppTabDropNone;          // Find, Settings, a floating panel
+
+    for (TabManager *mgr in [mwc sessionTabManagers]) {
+        NSView *area = mgr.contentView;
+        // A collapsed split pane has no visible area and is not a target.
+        if (area.isHiddenOrHasHiddenAncestor || NSIsEmptyRect(area.visibleRect)) continue;
+        NSPoint p = [area convertPoint:[win convertPointFromScreen:sp] fromView:nil];
+        if (!NSPointInRect(p, area.visibleRect)) continue;
+        if (mgr == src) return NppTabDropOwnPane;
+        if (outPane) *outPane = mgr;
+        if (outMWC)  *outMWC  = mwc;
+        return NppTabDropOtherPane;
+    }
+    return NppTabDropNone;                    // toolbar, status bar, side panel
+}
+
+// TabManagerDelegate.
+- (BOOL)tabManager:(TabManager *)tabManager canReleaseEditor:(EditorView *)editor
+     atScreenPoint:(NSPoint)screenPoint copy:(BOOL)copy {
+    switch ([self _tabDropAtScreenPoint:screenPoint source:tabManager pane:NULL controller:NULL]) {
+        case NppTabDropNone:      return NO;
+        case NppTabDropOwnPane:
+        case NppTabDropOtherPane: return YES;
+        // A window's only tab is not moved out to a new window: there is
+        // nothing to separate it from. A clone of it can still go.
+        case NppTabDropNewWindow: return copy || [self _totalEditorCount] > 1;
+    }
+    return NO;
+}
+
+- (BOOL)tabManager:(TabManager *)tabManager releaseEditor:(EditorView *)editor
+     atScreenPoint:(NSPoint)screenPoint copy:(BOOL)copy {
+    if (![self tabManager:tabManager canReleaseEditor:editor atScreenPoint:screenPoint copy:copy])
+        return NO;
+    TabManager *pane = nil;
+    MainWindowController *dstMWC = nil;
+    switch ([self _tabDropAtScreenPoint:screenPoint source:tabManager pane:&pane controller:&dstMWC]) {
+        case NppTabDropNone:
+            return NO;
+        case NppTabDropOwnPane:
+            [self _showTabDropMenuForEditor:editor inPane:tabManager atScreenPoint:screenPoint];
+            return YES;
+        case NppTabDropOtherPane:
+            if (copy) [self _cloneEditor:editor into:pane ofController:dstMWC atIndex:NSIntegerMax];
+            else      [self _transferEditor:editor from:tabManager to:pane ofController:dstMWC
+                                    atIndex:NSIntegerMax];
+            return YES;
+        case NppTabDropNewWindow:
+            if (copy) {
+                // A tab already linked to a clone cannot get another one.
+                if (editor.cloneSibling) { NSBeep(); return YES; }
+                MainWindowController *dst = [self _newWindowForTabAtScreenPoint:screenPoint placeAtPoint:YES];
+                if (dst) [self _cloneEditor:editor into:dst->_tabManager ofController:dst atIndex:0];
+            } else {
+                [self _moveEditor:editor toNewWindowAtScreenPoint:screenPoint placeAtPoint:YES];
+            }
+            return YES;
+    }
+    return NO;
+}
+
+- (void)tabManager:(TabManager *)tabManager moveEditor:(EditorView *)editor
+      toTabManager:(TabManager *)target atIndex:(NSInteger)index copy:(BOOL)copy {
+    id owner = target.delegate;
+    if (![owner isKindOfClass:[MainWindowController class]]) return;
+    MainWindowController *dstMWC = (MainWindowController *)owner;
+    if (dstMWC.windowHasClosed) return;
+    if (copy) [self _cloneEditor:editor into:target ofController:dstMWC atIndex:index];
+    else      [self _transferEditor:editor from:tabManager to:target ofController:dstMWC atIndex:index];
+}
+
+/// The menu Windows Notepad++ shows when a tab is dropped on its own text
+/// area. Its commands act on the current document, so the dropped tab is
+/// selected first; they are validated like the View > Move/Clone items.
+- (void)_showTabDropMenuForEditor:(EditorView *)ed inPane:(TabManager *)pane
+                    atScreenPoint:(NSPoint)sp {
+    NSUInteger idx = [pane.allEditors indexOfObject:ed];
+    if (idx == NSNotFound) return;
+    [pane selectTabAtIndex:(NSInteger)idx];
+
+    NppLocalizer *loc = [NppLocalizer shared];
+    NSMenu *menu = [[NSMenu alloc] init];
+    NSArray *items = @[
+        @[@"Move to Other Vertical View",    NSStringFromSelector(@selector(moveToOtherVerticalView:))],
+        @[@"Clone to Other Vertical View",   NSStringFromSelector(@selector(cloneToOtherVerticalView:))],
+        @[@""],
+        @[@"Move to Other Horizontal View",  NSStringFromSelector(@selector(moveToOtherHorizontalView:))],
+        @[@"Clone to Other Horizontal View", NSStringFromSelector(@selector(cloneToOtherHorizontalView:))],
+    ];
+    for (NSArray *it in items) {
+        if (it.count < 2) { [menu addItem:[NSMenuItem separatorItem]]; continue; }
+        NSMenuItem *mi = [[NSMenuItem alloc] initWithTitle:[loc translate:it[0]]
+                                                    action:NSSelectorFromString(it[1])
+                                             keyEquivalent:@""];
+        mi.target = self;
+        [menu addItem:mi];
+    }
+    NSView *view = self.window.contentView;
+    NSPoint p = [view convertPoint:[self.window convertPointFromScreen:sp] fromView:nil];
+    [menu popUpMenuPositioningItem:nil atLocation:p inView:view];
+}
+
+/// Open a clone of `ed` (sharing its document) in pane `dst` of `dstMWC`,
+/// at insertion slot `index` (clamped). As in Windows, a pane that already
+/// shows the document just activates that tab.
+- (void)_cloneEditor:(EditorView *)ed into:(TabManager *)dst
+        ofController:(MainWindowController *)dstMWC atIndex:(NSInteger)index {
+    if (!ed || !dst || !dstMWC) return;
+    sptr_t doc = NppDocumentOf(ed);
+    NSArray<EditorView *> *existing = dst.allEditors;
+    for (NSUInteger i = 0; i < existing.count; i++) {
+        if (NppDocumentOf(existing[i]) == doc) {
+            [dst selectTabAtIndex:(NSInteger)i];
+            if (dstMWC != self) [dstMWC.window makeKeyAndOrderFront:nil];
+            return;
+        }
+    }
+    // cloneSibling links exactly one pair of tabs (Save As, closing and the
+    // save prompt rely on it), so a document is shown by at most two tabs.
+    // Windows has the same limit: one tab per view, and two views.
+    if (ed.cloneSibling) { NSBeep(); return; }
+    EditorView *clone = [dst addNewTab];
+    [clone shareDocumentFrom:ed];
+    // Unpinned tabs follow the leading run of pinned ones.
+    NSInteger pinnedRun = 0;
+    while (pinnedRun < dst.tabBar.tabCount && [dst.tabBar isTabPinnedAtIndex:pinnedRun]) pinnedRun++;
+    NSInteger at = (NSInteger)dst.allEditors.count - 1;
+    NSInteger want = MAX(pinnedRun, MIN(index, at));
+    for (; at > want; at--) [dst swapEditorAtIndex:at withIndex:at - 1];
+    [dst selectTabAtIndex:want];
+    [dst refreshCurrentTabTitle];
+
+    if (dst == dstMWC->_subTabManagerV)      [dstMWC _ensureVerticalViewVisible];
+    else if (dst == dstMWC->_subTabManagerH) [dstMWC _ensureHorizontalViewVisible];
+    if (dstMWC != self) [dstMWC.window makeKeyAndOrderFront:nil];
+    [dstMWC updateTitle];
+    [dstMWC updateStatusBar];
+}
+
+/// Open a new window holding `ed`. With `placeAtPoint`, the window takes this
+/// window's size and is placed so its first tab sits under `screenPoint`
+/// (where a dragged tab was released); otherwise it is offset like Window >
+/// New Window.
+- (void)_moveEditor:(EditorView *)ed toNewWindowAtScreenPoint:(NSPoint)screenPoint
+       placeAtPoint:(BOOL)placeAtPoint {
+    TabManager *src = [self _managerOwningEditor:ed];
+    if (!src || [self _totalEditorCount] < 2) return;
+    MainWindowController *dst = [self _newWindowForTabAtScreenPoint:screenPoint placeAtPoint:placeAtPoint];
+    if (!dst) return;
+    [self _transferEditor:ed from:src to:dst->_tabManager ofController:dst atIndex:0];
+}
+
+/// A new, empty window for a tab leaving this one. See -_moveEditor:toNewWindowAtScreenPoint:placeAtPoint:.
+- (nullable MainWindowController *)_newWindowForTabAtScreenPoint:(NSPoint)screenPoint
+                                                   placeAtPoint:(BOOL)placeAtPoint {
+    id appDel = NSApp.delegate;
+    if (![appDel isKindOfClass:[AppDelegate class]]) return nil;
+
+    // Size: this window's, unless it is full screen (a new window must not
+    // copy the screen-filling size), in which case the stock 1024x768.
+    BOOL srcFullScreen = (self.window.styleMask & NSWindowStyleMaskFullScreen) != 0;
+    NSRect frame = self.window.frame;
+    if (srcFullScreen) frame.size = NSMakeSize(1024, 768);
+
+    NSScreen *screen = self.window.screen ?: [NSScreen mainScreen];
+    if (placeAtPoint) {
+        // Put the new window's first tab under the pointer, on the screen the
+        // tab was dropped on.
+        for (NSScreen *s in [NSScreen screens])
+            if (NSPointInRect(screenPoint, s.frame)) { screen = s; break; }
+        if (srcFullScreen) {
+            // No usable bar geometry to copy: hang the window from the pointer,
+            // leaving room for the title bar and toolbar above the tabs.
+            frame.origin = NSMakePoint(screenPoint.x - kTearOffGrabX,
+                                       screenPoint.y + kTearOffFullScreenTopGap - NSHeight(frame));
+        } else {
+            NppTabBar *bar = _tabManager.tabBar;
+            NSRect barRect = [self.window convertRectToScreen:[bar convertRect:bar.bounds toView:nil]];
+            frame.origin.x += screenPoint.x - (NSMinX(barRect) + kTearOffGrabX);
+            frame.origin.y += screenPoint.y - NSMidY(barRect);
+        }
+    }
+    // Never larger than the screen's usable area, and kept on it.
+    if (screen) frame = [self _frame:frame fittedToScreen:screen];
+
+    MainWindowController *dst = [(AppDelegate *)appDel openNewWindowWithFrame:frame];
+    if (!dst) return nil;
+    if (!placeAtPoint) {
+        // Menu command: cascade from this window the standard way (with a
+        // zero point the call on self.window only reports the next cascade
+        // point), then keep the result on screen.
+        NSRect vis = screen.visibleFrame;
+        NSPoint next = srcFullScreen ? NSMakePoint(NSMinX(vis) + 40, NSMaxY(vis) - 40)
+                                     : [self.window cascadeTopLeftFromPoint:NSZeroPoint];
+        [dst.window cascadeTopLeftFromPoint:next];
+        if (screen)
+            [dst.window setFrame:[self _frame:dst.window.frame fittedToScreen:screen] display:NO];
+    }
+    return dst;
+}
+
+/// Move `ed` from `src` (a pane of this window) to `dst` (a pane of `dstMWC`,
+/// which may be this window) at insertion slot `index`, keeping its pin and
+/// tab color, then tidy up whatever the move left behind here.
+- (void)_transferEditor:(EditorView *)ed from:(TabManager *)src to:(TabManager *)dst
+           ofController:(MainWindowController *)dstMWC atIndex:(NSInteger)index {
+    if (!ed || !src || !dst || src == dst || !dstMWC) return;
+    NSInteger srcIdx = (NSInteger)[src.allEditors indexOfObject:ed];
+    if (srcIdx == NSNotFound) return;
+
+    // `dst` already shows this document (its clone): as Windows does, show
+    // that tab and close this one, which the clone keeps the text alive for.
+    // If it was this window's only tab, the window closes as after any move.
+    if (ed.cloneSibling) {
+        sptr_t doc = NppDocumentOf(ed);
+        NSArray<EditorView *> *there = dst.allEditors;
+        for (NSUInteger i = 0; i < there.count; i++) {
+            if (NppDocumentOf(there[i]) != doc) continue;
+            [dst selectTabAtIndex:(NSInteger)i];
+            if (dstMWC != self) [dstMWC.window makeKeyAndOrderFront:nil];
+            _closingIntoClone = YES;
+            [src removeEditor:ed];
+            _closingIntoClone = NO;
+            return;
+        }
+    }
+    BOOL pinned = [src.tabBar isTabPinnedAtIndex:srcIdx];
+    NSInteger colorId = [src.tabBar tabColorAtIndex:srcIdx];
+
+    [src evictEditor:ed];
+    // Moving the primary view's last tab into this window's split pane: refill
+    // the primary BEFORE adopting (as -_moveEditor:toVertical: does), so the
+    // adopted tab, not the fresh untitled one, ends up active.
+    if (dstMWC == self && src == _tabManager && _tabManager.allEditors.count == 0)
+        [_tabManager addNewTab];
+    // Pinned tabs stay a leading group: a pinned tab lands among them, an
+    // unpinned one after them (the tab bar's drop marker applies the same rule).
+    NSInteger pinnedRun = 0;
+    while (pinnedRun < dst.tabBar.tabCount && [dst.tabBar isTabPinnedAtIndex:pinnedRun]) pinnedRun++;
+    index = pinned ? MIN(index, pinnedRun) : MAX(index, pinnedRun);
+    [dst adoptEditor:ed atIndex:index];
+    NSInteger dstIdx = (NSInteger)[dst.allEditors indexOfObject:ed];
+    if (dstIdx != NSNotFound) {
+        if (pinned)       [dst.tabBar pinTabAtIndex:dstIdx toggle:YES];
+        if (colorId >= 0) [dst.tabBar setTabColorAtIndex:dstIdx colorId:colorId];
+    }
+
+    // A split pane receiving the tab must be open to show it.
+    if (dst == dstMWC->_subTabManagerV)      [dstMWC _ensureVerticalViewVisible];
+    else if (dst == dstMWC->_subTabManagerH) [dstMWC _ensureHorizontalViewVisible];
+
+    if (dstMWC != self) {
+        [dstMWC updateTitle];
+        [dstMWC updateStatusBar];
+        [dstMWC.window makeKeyAndOrderFront:nil];
+    }
+    [self _settleAfterEditorLeft:src];
+}
+
+/// Restore this window's invariants after an editor left pane `src`: an
+/// emptied split pane collapses, an emptied primary view gets a fresh tab
+/// (as "Move to Other View" does), and a window left with no tabs at all
+/// closes, unless it is the last window.
+- (void)_settleAfterEditorLeft:(TabManager *)src {
+    if ([self _totalEditorCount] == 0) {
+        if ([self _hasOtherLiveWindow]) {
+            // Close on the next turn of the run loop: this is reached from
+            // inside the tab bar's mouse tracking, and closing releases this
+            // controller and its views. Hide it now so it never shows empty.
+            [self.window orderOut:nil];
+            __weak typeof(self) weakSelf = self;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                MainWindowController *strongSelf = weakSelf;
+                if (strongSelf && !strongSelf.windowHasClosed && [strongSelf _totalEditorCount] == 0)
+                    [strongSelf.window close];
+            });
+            return;
+        }
+        [_tabManager addNewTab];
+    } else if (src == _subTabManagerV && src.allEditors.count == 0) {
+        [_vSplitView setPosition:MAX(NSWidth(_vSplitView.frame), 9999) ofDividerAtIndex:0];
+    } else if (src == _subTabManagerH && src.allEditors.count == 0) {
+        [_hSplitView setPosition:MAX(NSHeight(_hSplitView.frame), 9999) ofDividerAtIndex:0];
+    } else if (src == _tabManager && src.allEditors.count == 0) {
+        [_tabManager addNewTab];
+    }
+
+    // The active pane may have just been emptied: re-point it at a pane that
+    // still has tabs, re-selecting there so the side panels, status bar and
+    // plugins follow.
+    if (_activeTabManager.allEditors.count == 0) {
+        for (TabManager *mgr in [self sessionTabManagers]) {
+            if (mgr.allEditors.count == 0) continue;
+            NSInteger sel = (NSInteger)[mgr.allEditors indexOfObject:mgr.currentEditor];
+            [mgr selectTabAtIndex:(sel == NSNotFound ? 0 : sel)];
+            break;
+        }
+    }
+    // A background tab may have left without any selection change, so no
+    // didSelectEditor: refreshed the Document List: reload it here or its rows
+    // (and their context menu) would still point at the departed editor.
+    if (_docListPanel) [_docListPanel reloadData];
+    [self updateTitle];
+    [self updateStatusBar];
 }
 
 #pragma mark - Pin / Lock Tab
@@ -6672,6 +7527,7 @@ static NSArray<NSDictionary *> *convertRecordedToXmlFormat(NSArray<NSDictionary 
     if (action == @selector(saveCurrentMacro:))     return ed && !recording && ed.macroActions.count > 0;
     if (action == @selector(runSavedMacro:))        return ed && !recording;
     if (action == @selector(trimTrailingSpaceAndSave:)) return _tabManager.allEditors.count > 0;
+    if (action == @selector(restoreRecentClosedFile:)) return [self _hasRestorableClosedFile];
 
     // Scroll sync — disabled when no split view is active
     BOOL hasSplitView = (_subTabManagerV.allEditors.count > 0 || _subTabManagerH.allEditors.count > 0);
@@ -6698,6 +7554,10 @@ static NSArray<NSDictionary *> *convertRecordedToXmlFormat(NSArray<NSDictionary 
 
     if (action == @selector(resetView:))
         return vHasTabs || hHasTabs;
+
+    // Move to New Window: needs another tab to leave behind.
+    if (action == @selector(moveToNewWindow:))
+        return ed != nil && [self _totalEditorCount] > 1;
 
     // Always on Top checkmark
     if (action == @selector(toggleAlwaysOnTop:)) {
@@ -6879,16 +7739,18 @@ static NSArray<NSDictionary *> *convertRecordedToXmlFormat(NSArray<NSDictionary 
     // and top-level XML/YAML/KIXtart items walking up to the menu bar).
     if (action == @selector(setLanguageFromMenu:)) {
         NSString *langCode = [(NSMenuItem *)item representedObject];
+        // Built-in items (including "None (Normal Text)", whose code is
+        // the empty string) are never checked while a UDL is active.
         NSString *current  = ed.currentLanguage ?: @"";
-        [mi setState:[current isEqualToString:langCode]
-            ? NSControlStateValueOn : NSControlStateValueOff];
+        BOOL on = !ed.currentLanguageIsUDL && [current isEqualToString:langCode];
+        [mi setState:on ? NSControlStateValueOn : NSControlStateValueOff];
         return YES;
     }
     if (action == @selector(setUDLLanguageFromMenu:)) {
         NSString *udlName = [(NSMenuItem *)item representedObject];
         NSString *current = ed.currentLanguage ?: @"";
-        [mi setState:[current isEqualToString:udlName]
-            ? NSControlStateValueOn : NSControlStateValueOff];
+        BOOL on = ed.currentLanguageIsUDL && [current isEqualToString:udlName];
+        [mi setState:on ? NSControlStateValueOn : NSControlStateValueOff];
         return YES;
     }
 
@@ -6910,8 +7772,9 @@ static NSArray<NSDictionary *> *convertRecordedToXmlFormat(NSArray<NSDictionary 
 }
 
 - (void)_ensureFindWindow {
-    FindWindow *fw = [FindWindow sharedWindow];
-    if (!fw.delegate) fw.delegate = self;
+    // The Find window is shared by every window; it acts on whichever window
+    // last invoked it, not the first one that ever did.
+    [FindWindow sharedWindow].delegate = self;
 }
 
 - (void)_fillFindFieldWithSelectionIfEnabled {
@@ -7630,8 +8493,8 @@ static NSArray<NSDictionary *> *convertRecordedToXmlFormat(NSArray<NSDictionary 
 }
 
 - (void)findWindow:(FindWindow *)fw navigateToFile:(NSString *)path atLine:(NSInteger)line {
-    [self openFileAtPath:path];
-    EditorView *ed = [self currentEditor];
+    // The file may be open in another window: use the editor actually shown.
+    EditorView *ed = [self openFileAtPath:path];
     if (ed && line > 0) [ed goToLineNumber:line];
 }
 
@@ -7659,8 +8522,8 @@ static NSArray<NSDictionary *> *convertRecordedToXmlFormat(NSArray<NSDictionary 
           navigateToFile:(NSString *)path atLine:(NSInteger)line
                matchText:(NSString *)text matchCase:(BOOL)mc {
     if (!path.length || line <= 0) return;
-    [self openFileAtPath:path];
-    EditorView *ed = [self currentEditor];
+    // The file may be open in another window: use the editor actually shown.
+    EditorView *ed = [self openFileAtPath:path];
     if (ed && line > 0) {
         [ed goToLineNumber:line];
         // Highlight the line
@@ -8199,14 +9062,20 @@ static NSArray<NSDictionary *> *convertRecordedToXmlFormat(NSArray<NSDictionary 
     if (!udl) return;
     EditorView *ed = [self currentEditor];
     if (!ed) return;
-    [[UserDefineLangManager shared] applyLanguage:udl toScintillaView:ed.scintillaView];
-    // Keep the editor's currentLanguage in sync with what's actually lexing
-    // the buffer. Without this, validateUserInterfaceItem: for UDL items
-    // compares against a stale language name and the UDL checkmark never
-    // appears, and the Languages-menu parent-header refresh can't see that
-    // a UDL is now active.
-    ed.currentLanguage = udlName;
+    // setLanguage: routes UDLs to applyLanguage: after SCI_STYLECLEARALL and
+    // the global style colours, so the previous lexer's colours do not show
+    // through styles whose colorStyle leaves fg/bg transparent. It also keeps
+    // currentLanguage in sync (UDL menu checkmark) and notifies plugins.
+    [ed setLanguage:udlName preferUDL:YES];
     [self updateStatusBar];
+}
+
+- (void)_userDefineLangsChanged:(NSNotification *)n {
+    [self rebuildUDLLanguageMenu];
+    // Deferred: editors observe the same notification and may run after
+    // this one, so the status bar must read their language once they have
+    // followed a rename or removal.
+    dispatch_async(dispatch_get_main_queue(), ^{ [self updateStatusBar]; });
 }
 
 /// Populate the Language menu with all loaded UDL names.
@@ -8251,7 +9120,9 @@ static NSArray<NSDictionary *> *convertRecordedToXmlFormat(NSArray<NSDictionary 
         NSMenuItem *mi = [[NSMenuItem alloc] initWithTitle:udl.name
                                                     action:@selector(setUDLLanguageFromMenu:)
                                              keyEquivalent:@""];
-        mi.target = self;
+        // No fixed target: the shared main menu is rebuilt by every window,
+        // so the action goes down the responder chain to the key window.
+        mi.target = nil;
         mi.representedObject = udl.name;
         mi.tag = 8800;
         [langMenu insertItem:mi atIndex:insertIdx];
@@ -8335,11 +9206,11 @@ static NSArray<NSDictionary *> *convertRecordedToXmlFormat(NSArray<NSDictionary 
 
 #pragma mark - Tab coloring
 
+/// Applies a preset color ID (-1 to 4) to the selected tab and synchronizes the Document List panel.
 - (void)_applyTabColor:(NSInteger)colorId {
     NSInteger idx = _activeTabManager.tabBar.selectedIndex;
     if (idx < 0) return;
     [_activeTabManager.tabBar setTabColorAtIndex:idx colorId:colorId];
-    // Re-tint the Document List row to match the colored tab right away.
     if (_docListPanel) [_docListPanel reloadData];
 }
 
@@ -8349,6 +9220,41 @@ static NSArray<NSDictionary *> *convertRecordedToXmlFormat(NSArray<NSDictionary 
 - (void)applyTabColor4:(id)sender { [self _applyTabColor:3]; }
 - (void)applyTabColor5:(id)sender { [self _applyTabColor:4]; }
 - (void)removeTabColor:(id)sender  { [self _applyTabColor:-1]; }
+
+/// Displays macOS NSColorPanel to select and apply an arbitrary custom color to the selected tab.
+- (void)applyTabCustomColor:(id)sender {
+    NSInteger idx = _activeTabManager.tabBar.selectedIndex;
+    if (idx < 0) return;
+
+    NSColor *current = [_activeTabManager.tabBar tabCustomColorAtIndex:idx];
+    NSColorPanel *panel = [NSColorPanel sharedColorPanel];
+    NSColor *initialColor = current ?: [NSColor colorWithRed:0.35 green:0.65 blue:1.0 alpha:1.0];
+    panel.color = initialColor;
+    panel.showsAlpha = NO;
+    panel.continuous = YES;
+    panel.target = self;
+    panel.action = @selector(changeColor:);
+
+    // Apply default color immediately if the tab was uncolored, giving instant visual feedback.
+    if (!current) {
+        [_activeTabManager.tabBar setTabCustomColor:initialColor atIndex:idx];
+        if (_docListPanel) [_docListPanel reloadData];
+    }
+    [panel orderFront:sender];
+}
+
+/// Continuous callback from NSColorPanel for live tab color adjustments.
+- (void)changeColor:(id)sender {
+    NSColorPanel *panel = [NSColorPanel sharedColorPanel];
+    NSInteger idx = _activeTabManager.tabBar.selectedIndex;
+    if (idx < 0) return;
+
+    // Convert to device-independent sRGB color space for consistent rendering and serialization.
+    NSColor *color = [panel.color colorUsingColorSpace:[NSColorSpace sRGBColorSpace]] ?: panel.color;
+
+    [_activeTabManager.tabBar setTabCustomColor:color atIndex:idx];
+    if (_docListPanel) [_docListPanel reloadData];
+}
 
 #pragma mark - Find panel animation
 
@@ -8514,6 +9420,8 @@ static NSArray<NSDictionary *> *convertRecordedToXmlFormat(NSArray<NSDictionary 
     if (!_languagesMenu) return;
 
     EditorView *ed = [self currentEditor];
+    // Letter headers cover built-in languages only.
+    BOOL builtInActive = !ed.currentLanguageIsUDL;
     NSString *current = ed.currentLanguage ?: @"";
 
     for (NSMenuItem *topItem in _languagesMenu.itemArray) {
@@ -8526,7 +9434,7 @@ static NSArray<NSDictionary *> *convertRecordedToXmlFormat(NSArray<NSDictionary 
             if (child.action == @selector(setLanguageFromMenu:)) {
                 isLetterSubmenu = YES;
                 NSString *code = (NSString *)child.representedObject ?: @"";
-                if (code.length && [current isEqualToString:code]) {
+                if (builtInActive && code.length && [current isEqualToString:code]) {
                     anyMatch = YES;
                     break;
                 }
@@ -8614,9 +9522,58 @@ static NSArray<NSDictionary *> *convertRecordedToXmlFormat(NSArray<NSDictionary 
     [self _refreshToolbarStates];
 }
 
+// Sent for closes and also for -evictEditor: (a tab moving out), so it must
+// not reshape panes: a moving tab is briefly in no pane at all.
 - (void)tabManager:(id)tabManager didCloseEditor:(EditorView *)editor {
     [self updateTitle];
     if (_docListPanel) [_docListPanel reloadData];
+}
+
+// A pane may lose its last tab to a close only while another pane of this
+// window still has tabs; the pane is then hidden (-tabManagerDidBecomeEmpty:).
+// A tab closed because its clone replaced it elsewhere may also empty the
+// whole window, which then closes as after a move.
+- (BOOL)tabManagerMayBecomeEmpty:(TabManager *)tabManager {
+    if (_closingIntoClone) return YES;
+    if (_inCloseBatch && tabManager == _tabManager) return NO;
+    return [self _totalEditorCount] - (NSInteger)tabManager.allEditors.count > 0;
+}
+
+- (void)tabManagerDidBecomeEmpty:(TabManager *)tabManager {
+    [self _paneEmptiedByClose:tabManager];
+}
+
+/// Windows Notepad++ hides a view whose last tab is closed while the other
+/// view still has tabs. An emptied split pane collapses. The primary view
+/// cannot be hidden here, so it takes the split pane's tabs instead, which
+/// looks the same: one view holding the remaining documents. A window left
+/// with no tabs at all closes, or gets a fresh tab if it is the last window.
+- (void)_paneEmptiedByClose:(TabManager *)pane {
+    if (pane != _tabManager || [self _totalEditorCount] == 0) {
+        [self _settleAfterEditorLeft:pane];
+        return;
+    }
+    TabManager *sub = _subTabManagerV.allEditors.count ? _subTabManagerV : _subTabManagerH;
+    if (sub.allEditors.count == 0) { [_tabManager addNewTab]; return; }
+    EditorView *shown = sub.currentEditor;
+    for (EditorView *e in [sub.allEditors copy])
+        [self _transferEditor:e from:sub to:_tabManager ofController:self atIndex:NSIntegerMax];
+    NSUInteger i = [_tabManager.allEditors indexOfObject:shown];
+    if (i != NSNotFound) [_tabManager selectTabAtIndex:(NSInteger)i];
+}
+
+- (BOOL)tabManagerShouldExitOnLastTabClose:(id)tabManager {
+    // Only exit when ALL tab managers across this window are empty. If a split
+    // view still holds tabs, don't quit — just let the empty pane remain.
+    for (TabManager *mgr in @[_tabManager, _subTabManagerH, _subTabManagerV]) {
+        if (mgr && mgr != (TabManager *)tabManager && mgr.allEditors.count > 0)
+            return NO;
+    }
+    // Every pane is empty. Close this window; if it is the last window,
+    // -applicationShouldTerminateAfterLastWindowClosed: returns YES and the
+    // app will quit automatically.
+    [self.window performClose:nil];
+    return YES;
 }
 
 #pragma mark - Cursor notification
@@ -8905,10 +9862,13 @@ typedef NS_ENUM(NSInteger, NppBatchCloseDecision) {
     BOOL allowAll = dirtyCount > 1;
 
     BOOL discardAll = NO;
+    // A batch that empties the primary view (Close All) leaves an untitled tab
+    // there rather than pulling the split pane's tabs in mid-batch.
+    _inCloseBatch = YES;
     for (EditorView *ed in editors) {
         if (ed.isModified && !ed.cloneSibling && !discardAll) {
             switch ([self _promptBatchSaveBeforeClose:ed allowAll:allowAll]) {
-                case NppBatchCloseCancel:     return;            // abort the whole batch
+                case NppBatchCloseCancel:     _inCloseBatch = NO; return;  // abort the whole batch
                 case NppBatchCloseDiscardAll: discardAll = YES; break;
                 case NppBatchCloseSaveAttempted:
                     if (ed.isModified) continue;                 // save failed/declined — keep this tab
@@ -8918,6 +9878,7 @@ typedef NS_ENUM(NSInteger, NppBatchCloseDecision) {
         }
         [mgr removeEditor:ed];
     }
+    _inCloseBatch = NO;
     [self updateTitle];
 }
 
@@ -9182,15 +10143,20 @@ typedef NS_ENUM(NSInteger, NppBatchCloseDecision) {
     panel.title = [NSString stringWithFormat:@"Choose files for %@ hash", algo];
     if ([panel runModal] != NSModalResponseOK) return;
 
+    // Lines use the target document's own line ending so a CRLF/CR
+    // document doesn't end up with mixed EOLs.
+    EditorView *ed = [self currentEditor];
+    NSString *eolName = ed.eolName;
+    NSString *eol = [eolName isEqualToString:@"CRLF"] ? @"\r\n"
+                  : [eolName isEqualToString:@"CR"]   ? @"\r" : @"\n";
     NSMutableString *results = [NSMutableString string];
     for (NSURL *url in panel.URLs) {
         NSData *data = [NSData dataWithContentsOfURL:url];
-        if (!data) { [results appendFormat:@"Error reading %@\n", url.path]; continue; }
+        if (!data) { [results appendFormat:@"Error reading %@%@", url.path, eol]; continue; }
         NSString *hash = [EditorView hexHashForAlgorithm:algo data:data];
-        [results appendFormat:@"%@  %@\n", hash ?: @"(error)", url.path];
+        [results appendFormat:@"%@  %@%@", hash ?: @"(error)", url.path, eol];
     }
     if (!results.length) return;
-    EditorView *ed = [self currentEditor];
     if (ed) {
         const char *u = results.UTF8String;
         [ed.scintillaView message:SCI_APPENDTEXT wParam:(uptr_t)strlen(u) lParam:(sptr_t)u];
@@ -9591,6 +10557,9 @@ typedef NS_ENUM(NSInteger, NppBatchCloseDecision) {
         [keyPopup addItemWithTitle:[NSString stringWithFormat:@"%c", c]];
     for (int i = 1; i <= 12; i++)
         [keyPopup addItemWithTitle:[NSString stringWithFormat:@"F%d", i]];
+    [keyPopup addItemsWithTitles:@[@"Backspace", @"Tab", @"Enter", @"Escape", @"Space",
+        @"Page Up", @"Page Down", @"End", @"Home", @"Left", @"Up", @"Right", @"Down",
+        @"Insert", @"Delete", @";", @"+", @"=", @",", @"-", @".", @"/", @"`", @"[", @"\\", @"]", @"'"]];
     [cv addSubview:keyPopup];
 
     // Conflict warning label
@@ -9633,9 +10602,7 @@ typedef NS_ENUM(NSInteger, NppBatchCloseDecision) {
             btnOK.enabled = YES;
             return;
         }
-        NSUInteger keyCode = 0;
-        if (keyName.length == 1) keyCode = [keyName characterAtIndex:0];
-        else if ([keyName hasPrefix:@"F"]) keyCode = 111 + [keyName substringFromIndex:1].intValue;
+        NSUInteger keyCode = NPPShortcutKeyCodeForPopupName(keyName);
         if (keyCode == 0) {
             conflictLabel.stringValue = @"";
             btnOK.enabled = YES;
@@ -9653,8 +10620,7 @@ typedef NS_ENUM(NSInteger, NppBatchCloseDecision) {
                 BOOL mCtrl = (m & NSEventModifierFlagControl) != 0;
                 BOOL mAlt = (m & NSEventModifierFlagOption) != 0;
                 BOOL mShift = (m & NSEventModifierFlagShift) != 0;
-                unichar mKey = [mi.keyEquivalent.uppercaseString characterAtIndex:0];
-                if (mKey >= 0xF704 && mKey <= 0xF70F) mKey = 112 + (mKey - 0xF704);
+                NSUInteger mKey = NPPShortcutKeyCodeForMenuKeyEquivalent(mi.keyEquivalent);
                 if (mKey == keyCode &&
                     mCmd == (chkCmd.state == NSControlStateValueOn) &&
                     mCtrl == (chkCtrl.state == NSControlStateValueOn) &&
@@ -9716,25 +10682,7 @@ typedef NS_ENUM(NSInteger, NppBatchCloseDecision) {
     BOOL hasOpt   = (chkOpt.state == NSControlStateValueOn);
     BOOL hasShift = (chkShift.state == NSControlStateValueOn);
     NSString *keyTitle = keyPopup.titleOfSelectedItem;
-    int keyCode = 0;
-    if ([keyTitle isEqualToString:@"None"]) keyCode = 0;
-    else if (keyTitle.length == 1) keyCode = [keyTitle characterAtIndex:0];
-    else if ([keyTitle hasPrefix:@"F"] && keyTitle.length <= 3) keyCode = 111 + [keyTitle substringFromIndex:1].intValue;
-    else if ([keyTitle isEqualToString:@"Backspace"]) keyCode = 8;
-    else if ([keyTitle isEqualToString:@"Tab"]) keyCode = 9;
-    else if ([keyTitle isEqualToString:@"Enter"]) keyCode = 13;
-    else if ([keyTitle isEqualToString:@"Escape"]) keyCode = 27;
-    else if ([keyTitle isEqualToString:@"Space"]) keyCode = 32;
-    else if ([keyTitle isEqualToString:@"Page Up"]) keyCode = 33;
-    else if ([keyTitle isEqualToString:@"Page Down"]) keyCode = 34;
-    else if ([keyTitle isEqualToString:@"End"]) keyCode = 35;
-    else if ([keyTitle isEqualToString:@"Home"]) keyCode = 36;
-    else if ([keyTitle isEqualToString:@"Left"]) keyCode = 37;
-    else if ([keyTitle isEqualToString:@"Up"]) keyCode = 38;
-    else if ([keyTitle isEqualToString:@"Right"]) keyCode = 39;
-    else if ([keyTitle isEqualToString:@"Down"]) keyCode = 40;
-    else if ([keyTitle isEqualToString:@"Insert"]) keyCode = 45;
-    else if ([keyTitle isEqualToString:@"Delete"]) keyCode = 46;
+    int keyCode = (int)NPPShortcutKeyCodeForPopupName(keyTitle);
 
     // Insert into shortcuts.xml using raw text manipulation (preserves file structure)
     NSString *shortcutsPath = NppConfigSubpath(@"shortcuts.xml");
@@ -10386,7 +11334,7 @@ static NSString *_makeCLIScriptForApp(NSString *appPath) {
          "    # `open --args` is silently dropped when the app is already\n"
          "    # running. Files ride behind --args so a fresh instance gets\n"
          "    # them too.\n"
-         "    open -a \"$APP\" --args \"${flags[@]}\" \"${files[@]}\"\n"
+         "    open -na \"$APP\" --args \"${flags[@]}\" \"${files[@]}\"\n"
          "elif [ ${#files[@]} -gt 0 ]; then\n"
          "    # Files only: pass them as `open` document arguments so an\n"
          "    # already-running instance opens them via application:openFiles:.\n"
@@ -10706,16 +11654,9 @@ static BOOL _writeCLIScript(NSString *script, NSString *path, NSError **outErr) 
     if (![NppThemeManager shared].usesGlassMaterials)
         _statusBar.layer.backgroundColor = [NppThemeManager shared].statusBarBackground.CGColor;
 
-    // Auto mode: switch editor theme to match system appearance
-    if ([NppThemeManager shared].mode == NppDarkModeAuto) {
-        BOOL isDark = [NppThemeManager shared].isDark;
-        NSString *targetTheme = isDark ? @"DarkModeDefault" : @"Default (stylers.xml)";
-        NPPStyleStore *store = [NPPStyleStore sharedStore];
-        if (![store.activeThemeName isEqualToString:targetTheme]) {
-            NSArray *lexers = [store lexersForTheme:targetTheme];
-            [store commitLexers:lexers themeName:targetTheme];
-        }
-    }
+    // Editor theme: NPPStyleStore observes this notification itself (it is
+    // created at launch) and switches to the theme remembered for the new
+    // appearance.
 
     // Re-skin the toolbar (light/dark icon set + colorization).
     [self _reskinToolbarIcons];
@@ -10942,7 +11883,7 @@ static int64_t _sysctlInt(const char *name) {
     [info appendFormat:@"C++ Standard: %ld\n", (long)__cplusplus];
     [info appendFormat:@"macOS Deployment Target: %s\n",
         [[[NSBundle mainBundle] objectForInfoDictionaryKey:@"LSMinimumSystemVersion"] UTF8String] ?: "11.0"];
-    [info appendString:@"Scintilla/Lexilla included: 5.6.0/5.4.7\n"];
+    [info appendString:@"Scintilla/Lexilla included: 5.6.6/5.5.3\n"];
     [info appendFormat:@"Bundle ID: %@\n", [[NSBundle mainBundle] bundleIdentifier] ?: @"n/a"];
     [info appendFormat:@"Path: %@\n", [[NSBundle mainBundle] executablePath]];
     [info appendFormat:@"Bundle Path: %@\n", [[NSBundle mainBundle] bundlePath]];
@@ -11165,6 +12106,13 @@ static int64_t _sysctlInt(const char *name) {
 
 #pragma mark - NSWindowDelegate
 
+// With several windows open, the shared Find window's buttons must act on the
+// document window the user is working in. Retarget it whenever this window
+// becomes key (it is never created here just for that).
+- (void)windowDidBecomeKey:(NSNotification *)n {
+    [FindWindow existingWindow].delegate = self;
+}
+
 - (void)windowWillClose:(NSNotification *)n {
     // The session save already ran in -windowShouldClose:, while this window was
     // still live. From here on the receiver must not contribute tabs to a later
@@ -11180,6 +12128,22 @@ static int64_t _sysctlInt(const char *name) {
     _scrollSyncTimer = nil;
     [self saveWindowFrame];
     // Note: session already saved in windowShouldClose:
+
+    // Another window stays open (e.g. this one closed because its last tab was
+    // dragged into it): hand it the shared per-app state that pointed here, and
+    // leave the auxiliary windows up, since the app is not going away.
+    MainWindowController *survivor = nil;
+    id appDel = NSApp.delegate;
+    if ([appDel isKindOfClass:[AppDelegate class]]) {
+        for (MainWindowController *mwc in [(AppDelegate *)appDel windowControllers])
+            if (mwc != self && !mwc.windowHasClosed) { survivor = mwc; break; }
+    }
+    if (survivor) {
+        FindWindow *fw = [FindWindow sharedWindow];
+        if (fw.delegate == (id)self) fw.delegate = survivor;
+        [(AppDelegate *)appDel windowControllerWillClose:self];
+        return;
+    }
 
     // Close all auxiliary windows so the app can terminate cleanly.
     // Without this, standalone windows (Plugins Admin, Find, Style Configurator, etc.)
@@ -11222,6 +12186,9 @@ static int64_t _sysctlInt(const char *name) {
     if (!terminating && [self sessionPersistenceEnabled]) {
         [self saveSessionForAllWindows];
     }
+    // Closing a window closes its tabs; keep them restorable from another
+    // window. Quitting does not close tabs, so it records nothing.
+    if (!terminating) [self _recordClosedTabsOfWindow];
     writeConfigXML();
     return YES;
 }
@@ -11398,6 +12365,12 @@ static NSString *languageDisplayName(NSString *langCode) {
 }
 
 - (void)updateStatusBar {
+    CGFloat statusSize = MAX(9.0, MIN(32.0, 11.0 + [self currentEditor].zoomLevel));
+    for (NSTextField *label in @[_statusLeft, _statusRight, _gitBranchLabel]) {
+        label.font = [NSFont monospacedDigitSystemFontOfSize:statusSize weight:NSFontWeightRegular];
+        label.textColor = NSColor.labelColor;
+    }
+    _statusHeight.constant = MAX(22.0, ceil(statusSize + 10.0));
     EditorView *ed = [self currentEditor];
     if (!ed) { _statusLeft.stringValue = _statusRight.stringValue = @""; return; }
     sptr_t docLength = [ed.scintillaView message:SCI_GETLENGTH wParam:0 lParam:0];
@@ -11491,6 +12464,17 @@ static NSString *languageDisplayName(NSString *langCode) {
     for (TabManager *mgr in @[_tabManager, _subTabManagerH, _subTabManagerV]) {
         [mgr refreshTitleForEditor:editor];
         if (sibling) [mgr refreshTitleForEditor:sibling];
+    }
+    // A clone dragged into another window keeps its sibling link, so its tab
+    // there goes stale at the same moment. Repaint it in that window directly
+    // (calling its -refreshTabsForEditor: would bounce straight back here).
+    id siblingOwner = sibling.window.windowController;
+    if (siblingOwner && siblingOwner != self &&
+        [siblingOwner isKindOfClass:[MainWindowController class]]) {
+        MainWindowController *other = (MainWindowController *)siblingOwner;
+        for (TabManager *mgr in [other sessionTabManagers])
+            [mgr refreshTitleForEditor:sibling];
+        [other updateTitle];
     }
     [self updateTitle];
     if (_docListPanel && [_sidePanelHost hasPanel:_docListPanel])

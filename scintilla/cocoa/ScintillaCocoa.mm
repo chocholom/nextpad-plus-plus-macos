@@ -16,9 +16,13 @@
 
 #include <cmath>
 
+#include <new>
+#include <string>
 #include <string_view>
 #include <vector>
 #include <optional>
+#include <algorithm>
+#include <memory>
 
 #import <Cocoa/Cocoa.h>
 #if MAC_OS_X_VERSION_MAX_ALLOWED > MAC_OS_X_VERSION_10_5
@@ -88,13 +92,18 @@ static const KeyToCommand macMapDefault[] = {
 	{Keys::Left,      SCI_ALT,    Message::WordLeft},
 	{Keys::Left,      SCI_META,   Message::WordLeft},
 	{Keys::Left,      SCI_SMETA,  Message::WordLeftExtend},
-	{Keys::Left,      SCI_ASHIFT, Message::CharLeftRectExtend},
+	// LOCAL CHANGE: Option+Shift+Left/Right select by word, as everywhere else on
+	// macOS. The Windows Alt+Shift column extend moves to Ctrl+Option+Shift;
+	// Option+Shift+Up/Down still extend a column block.
+	{Keys::Left,      SCI_ASHIFT, Message::WordLeftExtend},
+	{Keys::Left,      SCI_ASHIFT | SCI_META, Message::CharLeftRectExtend},
 	{Keys::Right,     SCI_NORM,   Message::CharRight},
 	{Keys::Right,     SCI_SHIFT,  Message::CharRightExtend},
 	{Keys::Right,     SCI_ALT,    Message::WordRight},
 	{Keys::Right,     SCI_META,   Message::WordRight},
 	{Keys::Right,     SCI_SMETA,  Message::WordRightExtend},
-	{Keys::Right,     SCI_ASHIFT, Message::CharRightRectExtend},
+	{Keys::Right,     SCI_ASHIFT, Message::WordRightExtend},
+	{Keys::Right,     SCI_ASHIFT | SCI_META, Message::CharRightRectExtend},
 	{Key('/'),           SCI_CTRL,   Message::WordPartLeft},
 	{Key('/'),           SCI_CSHIFT, Message::WordPartLeftExtend},
 	{Key('\\'),          SCI_CTRL,   Message::WordPartRight},
@@ -967,6 +976,8 @@ sptr_t ScintillaCocoa::WndProc(Message iMessage, uptr_t wParam, sptr_t lParam) {
 		}
 	} catch (std::bad_alloc &) {
 		errorStatus = Status::BadAlloc;
+	} catch (Failure &failure) {
+		errorStatus = failure.status;
 	} catch (...) {
 		errorStatus = Status::Failure;
 	}
@@ -1109,7 +1120,7 @@ void ScintillaCocoa::Paste(bool forceRectangular) {
 	{
 		UndoGroup ug(pdoc);
 		ClearSelection(false);
-		InsertPasteShape(selectedText.Data(), selectedText.Length(),
+		InsertPasteShape(selectedText.AsView(),
 				 selectedText.rectangular ? PasteShape::rectangular : PasteShape::stream);
 	}
 
@@ -1650,7 +1661,7 @@ bool ScintillaCocoa::PerformDragOperation(id <NSDraggingInfo> info) {
 		NSDragOperation operation = [info draggingSourceOperationMask];
 		bool moving = (operation & NSDragOperationMove) != 0;
 
-		DropAt(posDrag, text.Data(), text.Length(), moving, text.rectangular);
+		DropAt(posDrag, text.AsView(), moving, text.rectangular);
 	};
 
 	return true;

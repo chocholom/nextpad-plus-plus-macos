@@ -8,7 +8,10 @@ NS_ASSUME_NONNULL_BEGIN
 @interface MainWindowController : NSWindowController
 
 /// Open a file (called by AppDelegate when the OS hands us a file to open).
-- (void)openFileAtPath:(NSString *)path;
+/// A file already open in ANY window or split pane is focused there instead
+/// (that window is brought forward), so one file never has two buffers.
+/// Returns the editor showing the file, or nil if it could not be opened.
+- (nullable EditorView *)openFileAtPath:(NSString *)path;
 
 /// Bring the receiver's window to the user's attention: activate the app,
 /// deminiaturize the window if it's currently in the Dock, and order it
@@ -48,6 +51,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// explicitly rather than inferred from -[NSWindow isVisible], which is also NO
 /// for a merely miniaturized window.
 @property (nonatomic, readonly) BOOL windowHasClosed;
+/// While YES, closed tabs are not added to Restore Recent Closed File (batch runs).
+@property (nonatomic) BOOL suppressClosedFileRecording;
 
 /// Write session.plist covering the tabs of EVERY open window, and prune backup
 /// files no longer referenced by any of them.

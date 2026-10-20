@@ -1,9 +1,13 @@
+#import "NppCommandDispatch.h"
+#import "NppAPICompletion.h"
 #import "EditorView.h"
+#import "NppTextEncoding.h"
 #import "NppPaths.h"
 #import "NppApplication.h"
 #import "NppLangsManager.h"
 #import "UserDefineLangManager.h"
 #import "NppBuiltinLanguages.h"
+#import "NppKeywordSlots.h"
 #import "NppPluginManager.h"
 #import "PreferencesWindowController.h"
 #import "SearchEngine.h"   // #166 Phase 1: replay Windows Find/Replace (type-3) macros
@@ -18,6 +22,7 @@
 #import "GitHelper.h"
 #import "Scintilla.h"
 #import "ScintillaMessages.h"
+#import "NppScintillaIDs.h"
 #include "SciLexer.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <vector>
@@ -31,6 +36,8 @@ NSNotificationName const EditorViewZoomDidChangeNotification  = @"EditorViewZoom
 // Forward-declare Lexilla's CreateLexer (statically linked)
 namespace Scintilla { struct ILexer5; }
 extern "C" Scintilla::ILexer5 *CreateLexer(const char *name);
+
+static NSString *stylerKeywordSignature(NSString *lang);  // defined with applyKeywords:
 
 /// Returns YES if the named theme belongs to the explicit "dark fold margin" list.
 /// These themes get fold-margin bg = Default Style background; all others get #f2f2f2.
@@ -155,10 +162,11 @@ static NSDictionary<NSString *, NSString *> *extensionLanguageMap() {
             // .md/.markdown intentionally NOT mapped here — markdown is no
             // longer a built-in language; the preinstalled Markdown UDL
             // (~/Library/Application Support/Nextpad++/userDefineLangs/markdown._preinstalled.udl.xml)
-            // claims these extensions and is resolved via the UDL fallback
-            // in loadFileAtPath:. Mapping them to "markdown" here would
-            // shadow that fallback and leave the file plain (issue #130
-            // follow-up to the Windows-table menu overhaul).
+            // claims these extensions; languageNameForFileName() checks
+            // UDLs first. Without that UDL (e.g. the user deleted it) a
+            // "markdown" mapping here would leave the file plain, as there
+            // is no built-in markdown lexer (issue #130 follow-up to the
+            // Windows-table menu overhaul).
             @"tex"  : @"latex",   @"latex": @"latex",
             @"yml"  : @"yaml",    @"yaml" : @"yaml",
             @"toml" : @"toml",
@@ -202,6 +210,20 @@ static NSDictionary<NSString *, NSString *> *extensionLanguageMap() {
         map = [m copy];
     });
     return map;
+}
+
+// Language for a file name (no directory). A User Defined Language whose
+// ext= list claims the extension (or the whole name, when it has a dot) wins
+// over the built-in map, as on Windows (Buffer::setFileName checks
+// getUserDefinedLangNameFromExt first), so a user's UDL for an extension a
+// built-in also claims takes effect. For a light/dark UDL pair the variant
+// matching the editor theme is picked. *isUDL says which kind the name is,
+// for setLanguage:preferUDL: (a UDL may share a built-in's name).
+static NSString *languageNameForFileName(NSString *fileName, BOOL *isUDL) {
+    UserDefinedLang *udl = [[UserDefineLangManager shared] languageForFileName:fileName ?: @""];
+    *isUDL = (udl.name.length > 0);
+    if (*isUDL) return udl.name;
+    return extensionLanguageMap()[fileName.pathExtension.lowercaseString] ?: @"";
 }
 
 // Mirrors NPP's per-buffer ID — gives each untitled tab a unique number ("new 1", "new 2" …)
@@ -251,17 +273,57 @@ static NSStringEncoding canonicalCJKEncoding(NSStringEncoding ns) {
     }
 }
 
-// Files larger than the threshold get a warning + large-file mode (no syntax,
-// no undo, plus per-feature gates from Performance prefs). When the user has
-// disabled "Enable Large File Restriction" entirely, returns SIZE_MAX so no
-// file ever crosses the threshold.
-static NSUInteger nppLargeFileThreshold(void) {
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    if (![ud boolForKey:kPrefLargeFileEnabled]) return NSUIntegerMax;
-    NSInteger mb = [ud integerForKey:kPrefLargeFileSizeMB];
-    if (mb < 1)    mb = 1;
-    if (mb > 2046) mb = 2046;
-    return (NSUInteger)mb * 1024UL * 1024UL;
+// Files larger than the threshold (NppLargeFileThreshold, NppTextEncoding.h)
+// get a warning + large-file mode (no syntax, no undo, plus per-feature gates
+// from Performance prefs). Find in Files skips the charset detector above the
+// same size.
+
+// Scintilla's EOL mode is a per-document property and every new document
+// starts as SC_EOL_LF on macOS. New tabs take the "Default line ending" pref
+// (kPrefEOLType: 0=CRLF 1=LF 2=CR, which is NOT Scintilla's SC_EOL_* order).
+static int nppEOLModeFromPrefs(void) {
+    switch ([[NSUserDefaults standardUserDefaults] integerForKey:kPrefEOLType]) {
+        case 0:  return SC_EOL_CRLF;
+        case 2:  return SC_EOL_CR;
+        default: return SC_EOL_LF;
+    }
+}
+
+// Loaded files take the line ending of their first line break, like Windows
+// NPP's FileManager::getEOLFormatForm. Files with no line break fall back to
+// the pref. Searching for LF first bounds LF and CRLF files to line 1; only
+// CR-only files (or files with no line break) are scanned to the end.
+static int nppDetectEOLMode(const char *bytes, NSUInteger len) {
+    if (!bytes || !len) return nppEOLModeFromPrefs();
+    const char *lf = (const char *)memchr(bytes, '\n', len);
+    const char *cr = (const char *)memchr(bytes, '\r', lf ? (NSUInteger)(lf - bytes) : len);
+    if (cr) return (cr + 1 < bytes + len && cr[1] == '\n') ? SC_EOL_CRLF : SC_EOL_CR;
+    if (lf) return SC_EOL_LF;
+    return nppEOLModeFromPrefs();
+}
+
+// Scintilla's EOL mode is a per-document property and every new document
+// starts as SC_EOL_LF on macOS. New tabs take the "Default line ending" pref
+// (kPrefEOLType: 0=CRLF 1=LF 2=CR, which is NOT Scintilla's SC_EOL_* order).
+static int nppEOLModeFromPrefs(void) {
+    switch ([[NSUserDefaults standardUserDefaults] integerForKey:kPrefEOLType]) {
+        case 0:  return SC_EOL_CRLF;
+        case 2:  return SC_EOL_CR;
+        default: return SC_EOL_LF;
+    }
+}
+
+// Loaded files take the line ending of their first line break, like Windows
+// NPP's FileManager::getEOLFormatForm. Files with no line break fall back to
+// the pref. Searching for LF first bounds LF and CRLF files to line 1; only
+// CR-only files (or files with no line break) are scanned to the end.
+static int nppDetectEOLMode(const char *bytes, NSUInteger len) {
+    if (!bytes || !len) return nppEOLModeFromPrefs();
+    const char *lf = (const char *)memchr(bytes, '\n', len);
+    const char *cr = (const char *)memchr(bytes, '\r', lf ? (NSUInteger)(lf - bytes) : len);
+    if (cr) return (cr + 1 < bytes + len && cr[1] == '\n') ? SC_EOL_CRLF : SC_EOL_CR;
+    if (lf) return SC_EOL_LF;
+    return nppEOLModeFromPrefs();
 }
 
 @implementation EditorView {
@@ -301,6 +363,16 @@ static NSUInteger nppLargeFileThreshold(void) {
 
     // Git gutter state
     BOOL               _gitGutterEnabled;
+
+    // Lexer substyles (applyKeywords:): "substyleN" → allocated style ID for
+    // the current language's own styler rows, and the styler user-defined
+    // keywords last fed, so a Style Configurator keyword edit re-feeds lists.
+    NSDictionary<NSString *, NSNumber *> *_substyleIDs;
+    NSString          *_appliedStylerKeywords;
+    NSString *_apiCallName;
+    NSUInteger _apiOverload;
+    BOOL _sortingRectangle;
+    sptr_t _sortColumnStart, _sortColumnEnd;
 
     // Hex view
 }
@@ -344,10 +416,25 @@ static NSUInteger nppLargeFileThreshold(void) {
     if (dragTypes.count) [contentView registerForDraggedTypes:dragTypes];
 
     [self applyDefaultTheme];
+    [_scintillaView message:SCI_SETEOLMODE wParam:nppEOLModeFromPrefs()];
 
     [[NSNotificationCenter defaultCenter]
         addObserver:self selector:@selector(_preferencesChanged:)
                name:@"NPPPreferencesChanged" object:nil];
+    [[NSNotificationCenter defaultCenter]
+        addObserver:self selector:@selector(_userDefineLangsChanged:)
+               name:UserDefineLangsDidChangeNotification object:nil];
+}
+
+/// The UDL dialog saved (or renamed / removed) a UDL: re-apply it if this
+/// buffer uses it, following a rename to the new name. If the UDL is gone
+/// (removed), fall back to plain text like Windows (L_TEXT).
+- (void)_userDefineLangsChanged:(NSNotification *)n {
+    NSString *name = n.userInfo[@"name"], *oldName = n.userInfo[@"oldName"];
+    if (!_currentLanguageIsUDL || !_currentLanguage.length || !name.length) return;
+    if (![_currentLanguage isEqualToString:(oldName ?: name)]) return;
+    BOOL exists = [[UserDefineLangManager shared] languageNamed:name] != nil;
+    [self setLanguage:exists ? name : @"" preferUDL:YES];
 }
 
 - (void)dealloc {
@@ -400,7 +487,7 @@ static NSUInteger nppLargeFileThreshold(void) {
     _dirtyFromBackup = source->_dirtyFromBackup;
     _largeFileMode = source->_largeFileMode;
     if (source.currentLanguage.length)
-        [self setLanguage:source.currentLanguage];
+        [self setLanguage:source.currentLanguage preferUDL:source.currentLanguageIsUDL];
 
     // Establish bidirectional sibling link.
     self.cloneSibling = source;
@@ -416,7 +503,7 @@ static NSUInteger nppLargeFileThreshold(void) {
     NSUInteger fileSize = 0;
     if (attrs) fileSize = (NSUInteger)[attrs[NSFileSize] unsignedLongLongValue];
 
-    BOOL large = (fileSize > nppLargeFileThreshold());
+    BOOL large = (fileSize > NppLargeFileThreshold());
     if (large) {
         // The 2 GB suppress-warning toggle silences the dialog ONLY for files
         // ≥2 GB — smaller large files still prompt the user, since the prompt
@@ -541,38 +628,24 @@ static NSUInteger nppLargeFileThreshold(void) {
             enc = NSISOLatin1StringEncoding;
             utf8Data = rawData;
         } else {
-            // Small non-UTF-8: first ask macOS's heuristic charset detector — it
-            // covers the CJK encodings the old Win-1252/Latin-1 fallback turned into
-            // mojibake (GBK/GB18030, Big5, Shift-JIS, EUC, …). We only trust a result
-            // that decoded *without* lossy substitution; anything else falls through
-            // to the unchanged Win-1252/Latin-1 path, so Western files never regress.
-            NSString *detected = nil;
-            BOOL detLossy = NO;
-            NSStringEncoding guess = [NSString stringEncodingForData:rawData
-                                                    encodingOptions:nil
-                                                    convertedString:&detected
-                                                usedLossyConversion:&detLossy];
-            if (detected && guess != 0 && !detLossy && guess != NSUTF8StringEncoding) {
-                NSStringEncoding canon = canonicalCJKEncoding(guess);
-                enc = canon ?: guess;
-                utf8Data = [detected dataUsingEncoding:NSUTF8StringEncoding];
-            }
-
-            if (!utf8Data) {
-                // Fallback: try Win-1252, then Latin-1 (cheap walk on small files).
-                NSStringEncoding win1252 = nppEnc(kCFStringEncodingWindowsLatin1);
-                NSString *content = [[NSString alloc] initWithData:rawData encoding:win1252];
-                if (content) {
-                    enc = win1252;
-                    utf8Data = [content dataUsingEncoding:NSUTF8StringEncoding];
-                } else {
-                    content = [[NSString alloc] initWithData:rawData
-                                                    encoding:NSISOLatin1StringEncoding];
-                    if (content) {
-                        enc = NSISOLatin1StringEncoding;
-                        utf8Data = [content dataUsingEncoding:NSUTF8StringEncoding];
-                    }
-                }
+            // Small non-UTF-8: shared legacy detection (NppTextEncoding) so the
+            // editor and Find/Replace in Files decode a file the same way. The
+            // detector covers the CJK encodings the old Win-1252/Latin-1
+            // fallback turned into mojibake (GBK/GB18030, Big5, Shift-JIS,
+            // EUC, ...); otherwise Win-1252, then Latin-1. The editor runs the
+            // detector over the whole (small) file. A detector result whose
+            // UTF-8 conversion fails is vetoed so Win-1252/Latin-1 get a turn.
+            __block NSData *detectedUTF8 = nil;
+            NSStringEncoding legacyEnc = 0;
+            NSString *content = NppDecodeLegacyText(rawData, NppDetectorWholeData, &legacyEnc,
+                                                    ^BOOL(NSString *text) {
+                detectedUTF8 = [text dataUsingEncoding:NSUTF8StringEncoding];
+                return detectedUTF8 != nil;
+            });
+            if (content) {
+                NSStringEncoding canon = canonicalCJKEncoding(legacyEnc);
+                enc = canon ?: legacyEnc;
+                utf8Data = detectedUTF8 ?: [content dataUsingEncoding:NSUTF8StringEncoding];
             }
         }
     }
@@ -619,6 +692,10 @@ static NSUInteger nppLargeFileThreshold(void) {
     [_scintillaView message:SCI_ADDTEXT
                      wParam:(uptr_t)utf8Data.length
                      lParam:(sptr_t)utf8Data.bytes];
+    // The fresh document above defaults to LF; match the file instead so the
+    // status bar is right and Enter inserts the file's own line ending.
+    [_scintillaView message:SCI_SETEOLMODE
+                     wParam:nppDetectEOLMode((const char *)utf8Data.bytes, utf8Data.length)];
     _filePath = [path copy];
     _fileEncoding = enc;
     _hasBOM = hasBOM;
@@ -633,14 +710,8 @@ static NSUInteger nppLargeFileThreshold(void) {
 
     _largeFileMode = large;
 
-    NSString *ext = path.pathExtension.lowercaseString;
-    NSString *lang = extensionLanguageMap()[ext] ?: @"";
-    // Issue #130 — built-in extensions take precedence; if none matches, fall
-    // back to a User Defined Language whose ext= list claims this extension.
-    if (!lang.length) {
-        UserDefinedLang *udl = [[UserDefineLangManager shared] languageForExtension:ext];
-        if (udl) lang = udl.name;
-    }
+    BOOL langIsUDL = NO;
+    NSString *lang = languageNameForFileName(path.lastPathComponent, &langIsUDL);
     if (large) {
         // Syntax highlighting off (undo was already disabled before SCI_ADDTEXT
         // above — see "Pre-insert undo gate" comment).
@@ -653,7 +724,7 @@ static NSUInteger nppLargeFileThreshold(void) {
             [_scintillaView message:SCI_SETWRAPMODE wParam:SC_WRAP_NONE];
         }
     } else {
-        [self setLanguage:lang];
+        [self setLanguage:lang preferUDL:langIsUDL];
         // Re-enable undo in case this tab was previously in large-file mode.
         [_scintillaView message:SCI_SETUNDOCOLLECTION wParam:1 lParam:0];
     }
@@ -824,16 +895,15 @@ static NSUInteger nppLargeFileThreshold(void) {
     _lastKnownModDate = [[NSFileManager defaultManager]
                          attributesOfItemAtPath:path error:nil][NSFileModificationDate];
 
-    // Re-detect language if the file extension changed (e.g. Save As with new name)
-    NSString *oldExt = oldPath.pathExtension.lowercaseString ?: @"";
-    NSString *newExt = path.pathExtension.lowercaseString ?: @"";
-    if (![oldExt isEqualToString:newExt]) {
-        NSString *lang = extensionLanguageMap()[newExt] ?: @"";
-        if (!lang.length) {  // issue #130 — UDL extension fallback
-            UserDefinedLang *udl = [[UserDefineLangManager shared] languageForExtension:newExt];
-            if (udl) lang = udl.name;
-        }
-        [self setLanguage:lang];
+    // Re-detect the language when Save As / rename changes what the name
+    // maps to (its extension, or a whole-name UDL ext= entry such as
+    // "foo.conf"). A language picked by hand survives a rename that does not
+    // change the detected language.
+    BOOL oldIsUDL = NO, newIsUDL = NO;
+    NSString *oldDetected = languageNameForFileName(oldPath.lastPathComponent ?: @"", &oldIsUDL);
+    NSString *newDetected = languageNameForFileName(path.lastPathComponent, &newIsUDL);
+    if (![oldDetected isEqualToString:newDetected] || oldIsUDL != newIsUDL) {
+        [self setLanguage:newDetected preferUDL:newIsUDL];
     }
 
     // Issue #76 — DO NOT call updateGitDiffMarkers here unconditionally.
@@ -1161,7 +1231,12 @@ static NSUInteger nppLargeFileThreshold(void) {
 #pragma mark - Language / Lexer
 
 - (void)setLanguage:(NSString *)languageName {
+    [self setLanguage:languageName preferUDL:NO];
+}
+
+- (void)setLanguage:(NSString *)languageName preferUDL:(BOOL)preferUDL {
     _currentLanguage = [languageName copy];
+    _currentLanguageIsUDL = NO;
 
     // Reset all styles to STYLE_DEFAULT before switching language.
     // This prevents stale styles from a previous language from bleeding through.
@@ -1183,7 +1258,11 @@ static NSUInteger nppLargeFileThreshold(void) {
         return;
     }
 
-    NSString *lexerName = languageLexerNameMap()[languageName.lowercaseString];
+    // A UDL that must win over a built-in of the same name skips the
+    // built-in lookup.
+    UserDefinedLang *preferredUDL = preferUDL
+        ? [[UserDefineLangManager shared] languageNamed:languageName] : nil;
+    NSString *lexerName = preferredUDL ? nil : languageLexerNameMap()[languageName.lowercaseString];
     if (!lexerName) {
         // Not a built-in language. Try a User Defined Language of this exact
         // name (issue #130). Routing UDLs through setLanguage: makes them work
@@ -1191,9 +1270,10 @@ static NSUInteger nppLargeFileThreshold(void) {
         // restore, and the Language menu — not just the manual menu selection.
         // STYLECLEARALL above already reset styles; applyLanguage: then installs
         // the user lexer and the UDL's WordsStyle colors on top.
-        UserDefinedLang *udl = [[UserDefineLangManager shared] languageNamed:languageName];
+        UserDefinedLang *udl = preferredUDL ?: [[UserDefineLangManager shared] languageNamed:languageName];
         if (udl) {
             [[UserDefineLangManager shared] applyLanguage:udl toScintillaView:_scintillaView];
+            _currentLanguageIsUDL = YES;
         } else {
             [self applyPreferencesFromDefaults];
         }
@@ -1371,6 +1451,8 @@ static NSUInteger nppLargeFileThreshold(void) {
     [_scintillaView message:SCI_SETREADONLY wParam:0 lParam:0];
     [_scintillaView message:SCI_CLEARALL wParam:0 lParam:0];
     [_scintillaView message:SCI_ADDTEXT wParam:(uptr_t)utf8Data.length lParam:(sptr_t)utf8Data.bytes];
+    [_scintillaView message:SCI_SETEOLMODE
+                     wParam:nppDetectEOLMode((const char *)utf8Data.bytes, utf8Data.length)];
     [_scintillaView message:SCI_GOTOPOS wParam:0 lParam:0];
     [_scintillaView message:SCI_EMPTYUNDOBUFFER];
     _dirtyFromBackup = NO;
@@ -1487,6 +1569,19 @@ static NSColor *nppColorFromHex(NSString *hex) {
                            alpha:1.0];
 }
 
+// Font name to hand to SCI_STYLESETFONT. Scintilla's Cocoa backend resolves
+// the name through CoreText, which substitutes Helvetica (proportional) for a
+// font that is not installed, so Scintilla's own Monaco fallback never fires.
+// Windows-origin styles (Consolas, DejaVu Sans Mono, Source Code Pro in user
+// stylers.xml or theme copies) would otherwise render proportional. Fall back
+// to Menlo, the Mac default editor font, when the name does not resolve.
+static NSString *nppEditorFontName(NSString *name) {
+    if (!name.length) return name;
+    if ([NSFont fontWithName:name size:12]) return name;
+    if ([[NSFontManager sharedFontManager] availableMembersOfFontFamily:name].count) return name;
+    return @"Menlo";
+}
+
 - (void)applyThemeColors {
     NPPStyleStore *store = [NPPStyleStore sharedStore];
     NSString *fontName = store.globalFontName;
@@ -1515,6 +1610,7 @@ static NSColor *nppColorFromHex(NSString *hex) {
     if (gov && [_ud boolForKey:kPrefGlobalOverrideEnableItalic])    defItalic    = gov.italic;
     if (gov && [_ud boolForKey:kPrefGlobalOverrideEnableUnderline]) defUnderline = gov.underline;
 
+    fontName = nppEditorFontName(fontName);
     const char *fontNameUTF8 = fontName.UTF8String;
     [sci message:SCI_STYLESETFONT wParam:STYLE_DEFAULT lParam:(sptr_t)fontNameUTF8];
     [sci message:SCI_STYLESETSIZEFRACTIONAL wParam:STYLE_DEFAULT lParam:(sptr_t)(fontSize * 100)];
@@ -1595,37 +1691,30 @@ static NSColor *nppColorFromHex(NSString *hex) {
     // applyLexerColors is a no-op (NPPStyleStore only knows built-in lexers),
     // so SCI_STYLECLEARALL above would otherwise leave UDL-styled tabs as
     // plain text after every theme toggle. Re-route UDLs through the UDL
-    // apply path, and re-resolve by file extension so a multi-variant UDL
+    // apply path, and re-resolve by file name so a multi-variant UDL
     // (the markdown light/dark preinstalled pair) picks the variant matching
-    // the new dark-mode state.
+    // the new editor theme.
     if (_currentLanguage.length) {
         UserDefineLangManager *udlMgr = [UserDefineLangManager shared];
-        UserDefinedLang *udl = [udlMgr languageNamed:_currentLanguage];
+        // The flag, not the name, says whether this is a UDL: a built-in
+        // "python" must not be swapped for a UDL that happens to share it.
+        UserDefinedLang *udl = _currentLanguageIsUDL ? [udlMgr languageNamed:_currentLanguage] : nil;
         if (udl) {
-            // Default: re-apply the same UDL. Only re-resolve by extension
-            // (which picks the theme-matching variant for multi-variant UDLs
-            // like the markdown light/dark pair) when the *current* UDL
-            // actually claims this file's extension. Otherwise the user
+            // Default: re-apply the same UDL. Only switch to the
+            // theme-matching variant (markdown light/dark pair) when the
+            // *current* UDL actually claims this file. Otherwise the user
             // manually picked a UDL whose ext list doesn't include this
             // file (an override) — respect that choice.
-            UserDefinedLang *target = udl;
-            NSString *ext = _filePath.pathExtension.lowercaseString;
-            if (ext.length) {
-                BOOL currentClaimsExt = NO;
-                for (NSString *e in [udl.extensions componentsSeparatedByString:@" "]) {
-                    if ([e.lowercaseString isEqualToString:ext]) {
-                        currentClaimsExt = YES;
-                        break;
-                    }
-                }
-                if (currentClaimsExt) {
-                    UserDefinedLang *resolved = [udlMgr languageForExtension:ext];
-                    if (resolved) target = resolved;
-                }
-            }
+            UserDefinedLang *target = [udlMgr variantOf:udl forFileName:_filePath.lastPathComponent];
             [udlMgr applyLanguage:target toScintillaView:_scintillaView];
             _currentLanguage = [target.name copy];
         } else {
+            // A Style Configurator edit to user-defined keywords arrives
+            // through this same path; refeed the lists only when they changed
+            // (a colour drag fires many previews, and PHP's lists are large).
+            if (![stylerKeywordSignature(_currentLanguage.lowercaseString)
+                    isEqualToString:_appliedStylerKeywords ?: @""])
+                [self applyKeywords:_currentLanguage];
             [self applyLexerColors:_currentLanguage];
         }
     }
@@ -1726,7 +1815,7 @@ static NSColor *nppColorFromHex(NSString *hex) {
     if (gov && [_ud boolForKey:kPrefGlobalOverrideEnableItalic])    defItalic    = gov.italic;
     if (gov && [_ud boolForKey:kPrefGlobalOverrideEnableUnderline]) defUnderline = gov.underline;
 
-    [sci message:SCI_STYLESETFONT wParam:STYLE_DEFAULT lParam:(sptr_t)fontName.UTF8String];
+    [sci message:SCI_STYLESETFONT wParam:STYLE_DEFAULT lParam:(sptr_t)nppEditorFontName(fontName).UTF8String];
     [sci message:SCI_STYLESETSIZEFRACTIONAL wParam:STYLE_DEFAULT lParam:(sptr_t)(fontSize * 100)];
     [sci setColorProperty:SCI_STYLESETFORE parameter:STYLE_DEFAULT value:fg];
     [sci setColorProperty:SCI_STYLESETBACK parameter:STYLE_DEFAULT value:bg];
@@ -1775,7 +1864,6 @@ static NSColor *nppColorFromHex(NSString *hex) {
     // Indentation guides — honour the persisted kPrefShowIndentGuides toggle.
     BOOL showGuides = [[NSUserDefaults standardUserDefaults] boolForKey:kPrefShowIndentGuides];
     [sci message:SCI_SETINDENTATIONGUIDES wParam:(showGuides ? SC_IV_LOOKBOTH : SC_IV_NONE)];
-    [sci message:SCI_SETEOLMODE wParam:SC_EOL_LF];
     NPPStyleEntry *gsIndent = [store globalStyleNamed:@"Indent guideline style"];
     if (gsIndent.fgColor) [sci setColorProperty:SCI_STYLESETFORE parameter:37 value:gsIndent.fgColor];
     if (gsIndent.bgColor) [sci setColorProperty:SCI_STYLESETBACK parameter:37 value:gsIndent.bgColor];
@@ -2107,13 +2195,13 @@ static NSColor *nppColorFromHex(NSString *hex) {
     // RGB(0x77, 0xCC, 0x77) with full alpha, matching Windows NPP
     [sci message:SCI_SETELEMENTCOLOUR wParam:81 lParam:(sptr_t)(0xFF77CC77)]; // SC_ELEMENT_HIDDEN_LINE=81
 
-    // ── Smart highlight indicator (indicator 8) ──────────────────────────────
+    // ── Smart highlight indicator (indicator 29) ─────────────────────────────
     [sci message:SCI_INDICSETSTYLE wParam:kHighlightIndicator lParam:INDIC_ROUNDBOX];
     [sci message:SCI_INDICSETFORE  wParam:kHighlightIndicator
            lParam:sciColor([NSColor colorWithRed:1.0 green:0.85 blue:0.0 alpha:1])];
     [sci message:SCI_INDICSETALPHA wParam:kHighlightIndicator lParam:80];
 
-    // ── Mark-style indicators (indicators 9-13, styles 1-5) ──────────────────
+    // ── Mark-style indicators (indicators 25-21, styles 1-5) ─────────────────
     for (int i = 0; i < 5; i++) {
         [sci message:SCI_INDICSETSTYLE wParam:(uptr_t)kMarkInds[i] lParam:INDIC_ROUNDBOX];
         [sci message:SCI_INDICSETFORE  wParam:(uptr_t)kMarkInds[i] lParam:kMarkColors[i]];
@@ -2121,18 +2209,18 @@ static NSColor *nppColorFromHex(NSString *hex) {
         [sci message:SCI_INDICSETUNDER wParam:(uptr_t)kMarkInds[i] lParam:1]; // draw under text
     }
 
-    // ── Spell-check indicator (slot 17, INDIC_SQUIGGLE, red) ─────────────────
+    // ── Spell-check indicator (slot 30, INDIC_SQUIGGLE, red) ─────────────────
     [sci message:SCI_INDICSETSTYLE wParam:kSpellIndicator lParam:INDIC_SQUIGGLE];
     [sci message:SCI_INDICSETFORE  wParam:kSpellIndicator lParam:0x0000FF]; // red (BGR)
 
-    // ── Git diff line-highlight indicator (slot 18, INDIC_FULLBOX, pink) ─────
+    // ── Git diff line-highlight indicator (slot 26, INDIC_FULLBOX, pink) ─────
     [sci message:SCI_INDICSETSTYLE       wParam:kGitDiffIndicator lParam:INDIC_FULLBOX];
     [sci message:SCI_INDICSETFORE        wParam:kGitDiffIndicator lParam:0xB469FF]; // hot pink BGR (#FF69B4)
     [sci message:SCI_INDICSETALPHA       wParam:kGitDiffIndicator lParam:55];
     [sci message:SCI_INDICSETOUTLINEALPHA wParam:kGitDiffIndicator lParam:55];
     [sci message:SCI_INDICSETUNDER       wParam:kGitDiffIndicator lParam:1]; // draw under text
 
-    // ── Git gutter markers (margin 4, 4px, slots 6-8) ────────────────────────
+    // ── Git gutter markers (margin 4, 4px, slots 15-17) ──────────────────────
     [sci message:SCI_MARKERDEFINE  wParam:kGitMarkerAdded    lParam:SC_MARK_LEFTRECT];
     [sci message:SCI_MARKERSETBACK wParam:kGitMarkerAdded    lParam:0x44CC2E]; // green BGR
     [sci message:SCI_MARKERDEFINE  wParam:kGitMarkerModified lParam:SC_MARK_LEFTRECT];
@@ -2287,14 +2375,14 @@ static const struct SciDefaultKeys { int sciID; int n; sptr_t combos[4]; } kSciD
     { 2416, 1, { 0x3005B, 0, 0, 0 } },  // SCI_PARAUPEXTEND
     { 2304, 1, { 0x12E, 0, 0, 0 } },  // SCI_CHARLEFT
     { 2305, 1, { 0x1012E, 0, 0, 0 } },  // SCI_CHARLEFTEXTEND
-    { 2428, 1, { 0x5012E, 0, 0, 0 } },  // SCI_CHARLEFTRECTEXTEND
+    { 2428, 1, { 0x15012E, 0, 0, 0 } },  // SCI_CHARLEFTRECTEXTEND
     { 2306, 1, { 0x12F, 0, 0, 0 } },  // SCI_CHARRIGHT
     { 2307, 1, { 0x1012F, 0, 0, 0 } },  // SCI_CHARRIGHTEXTEND
-    { 2429, 1, { 0x5012F, 0, 0, 0 } },  // SCI_CHARRIGHTRECTEXTEND
+    { 2429, 1, { 0x15012F, 0, 0, 0 } },  // SCI_CHARRIGHTRECTEXTEND
     { 2308, 2, { 0x4012E, 0x10012E, 0, 0 } },  // SCI_WORDLEFT
-    { 2309, 1, { 0x11012E, 0, 0, 0 } },  // SCI_WORDLEFTEXTEND
+    { 2309, 2, { 0x11012E, 0x5012E, 0, 0 } },  // SCI_WORDLEFTEXTEND
     { 2310, 2, { 0x4012F, 0x10012F, 0, 0 } },  // SCI_WORDRIGHT
-    { 2311, 1, { 0x11012F, 0, 0, 0 } },  // SCI_WORDRIGHTEXTEND
+    { 2311, 2, { 0x11012F, 0x5012F, 0, 0 } },  // SCI_WORDRIGHTEXTEND
     { 2390, 1, { 0x2002F, 0, 0, 0 } },  // SCI_WORDPARTLEFT
     { 2391, 1, { 0x3002F, 0, 0, 0 } },  // SCI_WORDPARTLEFTEXTEND
     { 2392, 1, { 0x2005C, 0, 0, 0 } },  // SCI_WORDPARTRIGHT
@@ -2722,76 +2810,136 @@ static NSString *nppDefaultWordChars(ScintillaView *sci) {
 
 #pragma mark - Keywords
 
+/// User-defined keywords the Style Configurator holds for `group` in the
+/// `styler` lexer (the WordsStyle text of the row whose keywordClass is
+/// `group`). Windows' makeStyle() keeps the last such row; so does this.
+/// Reads that language's own styler (C keywords from "c", not "cpp"); the
+/// aliasing lookup is only a fallback for a stylers.xml without it.
+static NSString *stylerUserKeywords(NSString *styler, NSString *group) {
+    if (!styler.length) return nil;
+    NPPStyleStore *store = [NPPStyleStore sharedStore];
+    NSArray<NPPStyleEntry *> *styles = [store stylesForExactLexer:styler] ?: [store stylesForLexer:styler];
+    NSString *words = nil;
+    for (NPPStyleEntry *e in styles) {
+        if (e.keywords.length && [e.keywordClass isEqualToString:group]) words = e.keywords;
+    }
+    return words;
+}
+
+/// Windows concatToBuildKeywordList(): user-defined words, a space, then the
+/// langs.xml list.
+static NSString *joinKeywordLists(NSString *user, NSString *def) {
+    if (!user.length) return def;
+    if (!def.length) return user;
+    return [NSString stringWithFormat:@"%@ %@", user, def];
+}
+
+/// Every styler user-defined keyword list applyKeywords: reads for `lang`.
+/// A change means the Style Configurator edited keywords and the lists need
+/// feeding again.
+static NSString *stylerKeywordSignature(NSString *lang) {
+    if ([lang isEqualToString:@"javascript"]) lang = @"javascript.js";  // as applyKeywords:
+    NSMutableString *sig = [NSMutableString string];
+    NppKeywordSlot slots[kNppKeywordSlotsMax];
+    NSUInteger slotCount = NppKeywordSlotsForLanguage(lang, slots, kNppKeywordSlotsMax);
+    for (NSUInteger i = 0; i < slotCount; i++) {
+        NSString *src = slots[i].sourceLang ? @(slots[i].sourceLang) : lang;
+        NSString *styler = slots[i].stylerLang ? @(slots[i].stylerLang) : src;
+        [sig appendFormat:@"%@\n", stylerUserKeywords(styler, @(slots[i].group)) ?: @""];
+    }
+    NppSubstyleBase bases[kNppSubstyleBasesMax];
+    NSUInteger baseCount = NppSubstyleBasesForLanguage(lang, bases, kNppSubstyleBasesMax);
+    for (NSUInteger i = 0; i < baseCount; i++) {
+        NSString *src = bases[i].sourceLang ? @(bases[i].sourceLang) : lang;
+        for (int k = 0; k < bases[i].count; k++) {
+            NSString *group = [NSString stringWithFormat:@"substyle%d", bases[i].firstGroup + k];
+            [sig appendFormat:@"%@\n", stylerUserKeywords(src, group) ?: @""];
+        }
+    }
+    return sig;
+}
+
 - (void)applyKeywords:(NSString *)lang {
     ScintillaView *sci = _scintillaView;
     lang = lang.lowercaseString;
-
-    // Some languages share lexers — map to the canonical language for keyword lookup.
-    // c, objc, swift all use the cpp lexer; javascript.js uses javascript.
-    NSString *kwLang = lang;
-    if ([@[@"c", @"objc"] containsObject:lang]) kwLang = @"cpp";
-    if ([lang isEqualToString:@"javascript.js"]) kwLang = @"javascript";
+    // Legacy "javascript" tabs (L_JS_EMBEDDED) read the javascript.js lists, so
+    // treat them as javascript.js for the own-list check below.
+    if ([lang isEqualToString:@"javascript"]) lang = @"javascript.js";
 
     NppLangsManager *lm = [NppLangsManager shared];
     BOOL fed = NO;
 
-    // Keyword class names → Scintilla SCI_SETKEYWORDS index.
-    // The mapping follows the most common pattern used by Scintilla lexers:
-    // instre1→0, type1→1, instre2→2, type2→3, type3→4, type4→5, type5→6, type6→7, type7→8
-    static NSDictionary<NSString *, NSNumber *> *kwClassToIndex;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        kwClassToIndex = @{
-            @"instre1": @0, @"type1": @1, @"instre2": @2,
-            @"type2": @3, @"type3": @4, @"type4": @5,
-            @"type5": @6, @"type6": @7, @"type7": @8,
-        };
-    });
-
-    // Issue #28 — LexHTML's WordListSet uses bespoke slot semantics that
-    // diverge from the universal `instre1=0` convention. The slot layout
-    // (htmlWordListDesc[] in lexilla/lexers/LexHTML.cxx) is:
-    //   0 = HTML elements & attributes (lowercased)
-    //   1 = JavaScript keywords
-    //   2 = VBScript keywords
-    //   3 = Python keywords
-    //   4 = PHP keywords
-    //   5 = SGML/DTD keywords
-    // langs.xml exposes each language's keywords under `instre1` (and HTML
-    // also under `instre2` for DTD), so without an override:
-    //   • PHP keywords land in slot 0 → never matched as SCE_HPHP_WORD
-    //   • ASP/VB keywords land in slot 0 → never matched as SCE_HB_WORD
-    //   • HTML's instre2 (DTD) lands in slot 2 (VBScript) → never matched
-    //   • XML's instre1 (DTD) lands in slot 0 → never matched
-    // All other 127 Lexilla lexers follow `slot 0 = primary keywords`, so the
-    // generic mapping is correct for them. The override only triggers for
-    // LexHTML-family languages.
-    NSDictionary<NSString *, NSNumber *> *idxOverride = nil;
-    if ([kwLang isEqualToString:@"php"]) {
-        idxOverride = @{ @"instre1": @4 };               // PHP keywords
-    } else if ([kwLang isEqualToString:@"asp"]) {
-        idxOverride = @{ @"instre1": @2 };               // VBScript keywords
-    } else if ([kwLang isEqualToString:@"html"]) {
-        idxOverride = @{ @"instre2": @5 };               // SGML/DTD; instre1 already correct (HTML tags → slot 0)
-    } else if ([kwLang isEqualToString:@"xml"]) {
-        idxOverride = @{ @"instre1": @5 };               // SGML/DTD
-    }
-
-    // Feed keywords from langs.xml for all keyword classes
-    for (NSString *kwClass in kwClassToIndex) {
-        NSString *kw = [lm keywordsForLanguage:kwLang keywordClass:kwClass];
+    // Feed langs.xml keyword groups into the lexer's word list slots the way
+    // Windows Notepad++ does. The group-to-slot table (generic LIST_n masks
+    // plus the bespoke C++/JS/ObjC/TCL/JSON/XML/HTML setters) lives in
+    // NppKeywordSlots.mm. Some slots read another language's list: doxygen
+    // tags come from cpp's type2, and HTML/PHP/ASP/JSP all load the HTML,
+    // embedded JavaScript, VBScript and PHP lists into LexHTML's slots.
+    // Several entries may target one slot; their words are merged (deduped).
+    // Only the language's own lists count as "fed": a lone cross-language
+    // list such as cpp's doxygen tags must not suppress the fallback below.
+    // Each entry contributes its styler's user-defined keywords (Style
+    // Configurator) followed by the langs.xml group, like Windows'
+    // concatToBuildKeywordList().
+    NppKeywordSlot slots[kNppKeywordSlotsMax];
+    NSUInteger slotCount = NppKeywordSlotsForLanguage(lang, slots, kNppKeywordSlotsMax);
+    NSMutableDictionary<NSNumber *, NSMutableOrderedSet<NSString *> *> *words = [NSMutableDictionary dictionary];
+    for (NSUInteger i = 0; i < slotCount; i++) {
+        NSString *src = slots[i].sourceLang ? @(slots[i].sourceLang) : lang;
+        NSString *styler = slots[i].stylerLang ? @(slots[i].stylerLang) : src;
+        NSString *group = @(slots[i].group);
+        NSString *kw = joinKeywordLists(stylerUserKeywords(styler, group),
+                                        [lm keywordsForLanguage:src keywordClass:group]);
+        // Every slot in the table is sent, empty ones as "": on a live
+        // refresh (same lexer, Style Configurator keywords cleared or
+        // cancelled) that is what removes the old words.
+        NSMutableOrderedSet *set = words[@(slots[i].slot)];
+        if (!set) words[@(slots[i].slot)] = set = [NSMutableOrderedSet orderedSet];
         if (!kw.length) continue;
-        NSNumber *ov = idxOverride[kwClass];
-        NSInteger idx = ov ? ov.integerValue : kwClassToIndex[kwClass].integerValue;
-        const char *utf8 = kw.UTF8String;
-        [sci message:SCI_SETKEYWORDS wParam:(uptr_t)idx lParam:(sptr_t)utf8];
-        fed = YES;
+        for (NSString *w in [kw componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet])
+            if (w.length) [set addObject:w];
+        if ([src isEqualToString:lang]) fed = YES;
     }
+    for (NSNumber *slot in words) {
+        NSString *kw = [words[slot].array componentsJoinedByString:@" "];
+        [sci message:SCI_SETKEYWORDS wParam:slot.unsignedIntegerValue lParam:(sptr_t)kw.UTF8String];
+    }
+
+    // Substyles (Windows populateSubStyleKeywords()): allocate each base's
+    // substyles in Windows' order, then feed the substyleN groups to them with
+    // SCI_SETIDENTIFIERS. The lexer is fresh after setLanguage:, but this also
+    // runs again on a Style Configurator keyword edit, so free first; the
+    // reallocation hands out the same IDs.
+    [sci message:SCI_FREESUBSTYLES];
+    NSMutableDictionary<NSString *, NSNumber *> *substyleIDs = [NSMutableDictionary new];
+    NppSubstyleBase bases[kNppSubstyleBasesMax];
+    NSUInteger baseCount = NppSubstyleBasesForLanguage(lang, bases, kNppSubstyleBasesMax);
+    for (NSUInteger i = 0; i < baseCount; i++) {
+        NSString *src = bases[i].sourceLang ? @(bases[i].sourceLang) : lang;
+        sptr_t first = [sci message:SCI_ALLOCATESUBSTYLES
+                             wParam:(uptr_t)bases[i].baseStyle
+                             lParam:(sptr_t)bases[i].count];
+        if (first < 0) continue;  // lexer has no substyles for this base
+        for (int k = 0; k < bases[i].count; k++) {
+            NSString *group = [NSString stringWithFormat:@"substyle%d", bases[i].firstGroup + k];
+            NSString *words = joinKeywordLists(stylerUserKeywords(src, group),
+                                               [lm keywordsForLanguage:src keywordClass:group]);
+            // Sent even when empty, which clears a substyle on a live refresh.
+            [sci message:SCI_SETIDENTIFIERS wParam:(uptr_t)(first + k)
+                  lParam:(sptr_t)(words.UTF8String ?: "")];
+            // applyLexerColors: puts this language's own substyle rows on
+            // the IDs actually allocated.
+            if ([src isEqualToString:lang]) substyleIDs[group] = @(first + k);
+        }
+    }
+    _substyleIDs = [substyleIDs copy];
+    _appliedStylerKeywords = stylerKeywordSignature(lang);
 
     if (fed) return;
 
-    // Hardcoded fallback for the 4 languages that had keywords before langs.xml
-    if ([kwLang isEqualToString:@"cpp"]) {
+    // Hardcoded fallback, used only when langs.xml supplied nothing (e.g. it
+    // failed to load). Every list here is primary keywords, so slot 0.
+    if ([@[@"c", @"cpp", @"objc"] containsObject:lang]) {
         const char *kw = "alignas alignof and and_eq asm auto bitand bitor bool break case catch char "
             "char8_t char16_t char32_t class compl concept const consteval constexpr constinit "
             "const_cast continue co_await co_return co_yield decltype default delete do double "
@@ -2802,18 +2950,18 @@ static NSString *nppDefaultWordChars(ScintillaView *sci) {
             "typedef typeid typename union unsigned using virtual void volatile wchar_t while "
             "xor xor_eq";
         [sci message:SCI_SETKEYWORDS wParam:0 lParam:(sptr_t)kw];
-    } else if ([kwLang isEqualToString:@"python"]) {
+    } else if ([lang isEqualToString:@"python"]) {
         const char *kw = "False None True and as assert async await break class continue def del "
             "elif else except finally for from global if import in is lambda nonlocal not or "
             "pass raise return try while with yield";
         [sci message:SCI_SETKEYWORDS wParam:0 lParam:(sptr_t)kw];
-    } else if ([kwLang isEqualToString:@"javascript"]) {
+    } else if ([@[@"javascript", @"javascript.js"] containsObject:lang]) {
         const char *kw = "async await break case catch class const continue debugger default "
             "delete do else export extends false finally for from function if import in "
             "instanceof let new null of return static super switch this throw true try typeof "
             "undefined var void while with yield";
         [sci message:SCI_SETKEYWORDS wParam:0 lParam:(sptr_t)kw];
-    } else if ([kwLang isEqualToString:@"sql"]) {
+    } else if ([lang isEqualToString:@"sql"]) {
         const char *kw = "add all alter and any as asc authorization backup begin between by "
             "cascade case check close clustered coalesce column commit compute constraint "
             "contains containstable continue convert create cross current current_date "
@@ -2836,13 +2984,12 @@ static NSString *nppDefaultWordChars(ScintillaView *sci) {
     }
 }
 
-static const int kBookmarkMarker       = 20;
-static const int kHideLinesBeginMarker = 19; // green ▶ arrow on line BEFORE hidden range
-static const int kHideLinesEndMarker   = 18; // green ◀ arrow on line AFTER hidden range
-static const int kHighlightIndicator   =  8; // INDICATOR_CONTAINER = 8, avoids lexer indicators 0-7
+// Marker and indicator numbers (bookmark, hide-lines, smart highlight, mark
+// styles, spell, git, links, inc search) live in NppScintillaIDs.h so the
+// plugin allocation ranges can be checked against them.
 
-// 5 mark-style indicators (9-13): Scintilla BGR colors (b<<16|g<<8|r)
-static const int     kMarkInds[5]    = { 9, 10, 11, 12, 13 };
+// 5 mark-style indicators (25-21, as on Windows): Scintilla BGR colors (b<<16|g<<8|r)
+static const int *const kMarkInds = kMarkStyleIndicators;
 static const sptr_t  kMarkColors[5]  = {
     0xFFFF00, // style 1: cyan   (R=0,   G=255, B=255)
     0x00FFFF, // style 2: yellow (R=255, G=255, B=0  )
@@ -2851,21 +2998,6 @@ static const sptr_t  kMarkColors[5]  = {
     0xFF64C8, // style 5: violet (R=200, G=100, B=255)
 };
 
-// Spell-check indicator (slot 17, INDIC_SQUIGGLE red)
-static const int kSpellIndicator = 17;
-
-// Git diff line-highlight indicator (slot 18, INDIC_FULLBOX, pink)
-static const int kGitDiffIndicator = 18;
-
-// Clickable-link indicator (slot 19, issue #133). Style derived from prefs
-// (underline vs colored text; fullbox hover).
-static const int kClickableLinkIndicator = 19;
-
-// Git gutter marker slots — must be 0-19 (0-24 are user-definable, but 21-24
-// are used by change-history and 25-31 are reserved for fold markers).
-static const int kGitMarkerAdded    = 6;
-static const int kGitMarkerModified = 7;
-static const int kGitMarkerDeleted  = 8;
 static const int kGitGutterMargin   = 4;  // margin index for git gutter
 
 #pragma mark - Lexer Colors
@@ -2874,11 +3006,13 @@ static const int kGitGutterMargin   = 4;  // margin index for git gutter
     if (!lang.length) return;
     ScintillaView *sci = _scintillaView;
 
-    // Map EditorView language names to NPP style-store lexer IDs
+    // C, Objective-C and TypeScript have their own style sections (as on
+    // Windows). Only the legacy "javascript" tab language (a file opened as
+    // JavaScript before the javascript.js rename) needs mapping: its lexer is
+    // cpp, so it takes the JavaScript file styles, not the embedded-JS ones.
     NSString *lid = lang.lowercaseString;
-    if ([lid isEqualToString:@"c"] || [lid isEqualToString:@"objc"]) lid = @"cpp";
-    else if ([lid isEqualToString:@"javascript"] || [lid isEqualToString:@"typescript"])
-                                                                      lid = @"cpp";
+    if ([lid isEqualToString:@"javascript"]) lid = @"javascript.js";
+    BOOL objc = [lid isEqualToString:@"objc"];
 
     NPPStyleStore *store = [NPPStyleStore sharedStore];
     NSArray<NPPStyleEntry *> *styles = [store stylesForLexer:lid];
@@ -2905,6 +3039,21 @@ static const int kGitGutterMargin   = 4;  // margin index for git gutter
 
     for (NPPStyleEntry *e in styles) {
         int sid = e.styleID;
+        // stylers.model.xml and every theme (upstream too) list the ObjC
+        // DIRECTIVE/QUALIFIER styles as 19/20, but LexObjC emits
+        // SCE_OBJC_DIRECTIVE (20) and SCE_OBJC_QUALIFIER (21). Apply them by
+        // name so QUALIFIER no longer paints @-directives.
+        if (objc) {
+            if ([e.name isEqualToString:@"DIRECTIVE"])      sid = SCE_OBJC_DIRECTIVE;
+            else if ([e.name isEqualToString:@"QUALIFIER"]) sid = SCE_OBJC_QUALIFIER;
+        }
+        // Substyle rows (keywordClass substyleN) go on the ID applyKeywords:
+        // allocated. stylers.xml numbers them to match Lexilla's allocation
+        // order, so this only differs if a stylers.xml was edited by hand.
+        if ([e.keywordClass hasPrefix:@"substyle"]) {
+            NSNumber *allocated = _substyleIDs[e.keywordClass];
+            if (allocated) sid = allocated.intValue;
+        }
 
         // fg
         if (ovFg && gov) {
@@ -2926,9 +3075,9 @@ static const int kGitGutterMargin   = 4;  // margin index for git gutter
         // font name
         if (ovFont && gov) {
             if (gov.fontName.length > 0)
-                [sci message:SCI_STYLESETFONT wParam:sid lParam:(sptr_t)gov.fontName.UTF8String];
+                [sci message:SCI_STYLESETFONT wParam:sid lParam:(sptr_t)nppEditorFontName(gov.fontName).UTF8String];
         } else if (e.fontName.length > 0) {
-            [sci message:SCI_STYLESETFONT wParam:sid lParam:(sptr_t)e.fontName.UTF8String];
+            [sci message:SCI_STYLESETFONT wParam:sid lParam:(sptr_t)nppEditorFontName(e.fontName).UTF8String];
         }
 
         // font size
@@ -3748,8 +3897,6 @@ static const int kHistoryMask = (1 << SC_MARKNUM_HISTORY_MODIFIED);
 
 #pragma mark - Incremental Search (highlight all matches)
 
-static const int kIndicatorIncSearch = 28; // Scintilla indicator slot for incremental search
-
 - (void)highlightAllMatches:(NSString *)text matchCase:(BOOL)mc {
     ScintillaView *sci = _scintillaView;
     // Clear previous incremental search highlights
@@ -4131,49 +4278,7 @@ static NSRegularExpression *nppClickableSchemeRegex(NSString *schemes) {
 // the selector string in sParam). Only the common, macro-relevant commands are
 // mapped; unmapped ids are logged and skipped. Each selector below is verified
 // against MenuBuilder.mm.
-static NSString *_winMacroCmdSelector(long long idm) {
-    static NSDictionary<NSNumber *, NSString *> *map;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        map = @{
-            // ── File (IDM_FILE = 41000) ──
-            @41001: @"newDocument:",          // IDM_FILE_NEW
-            @41002: @"openDocument:",         // IDM_FILE_OPEN
-            @41003: @"closeCurrentTab:",      // IDM_FILE_CLOSE
-            @41004: @"closeAllTabs:",         // IDM_FILE_CLOSEALL
-            @41006: @"saveDocument:",         // IDM_FILE_SAVE
-            @41007: @"saveAllDocuments:",     // IDM_FILE_SAVEALL
-            @41008: @"saveDocumentAs:",       // IDM_FILE_SAVEAS
-            @41010: @"printDocument:",        // IDM_FILE_PRINT
-            @41014: @"reloadFromDisk:",       // IDM_FILE_RELOAD
-            // ── Edit (IDM_EDIT = 42000) ──
-            @42001: @"cut:",                  // IDM_EDIT_CUT
-            @42002: @"copy:",                 // IDM_EDIT_COPY
-            @42003: @"undo:",                 // IDM_EDIT_UNDO
-            @42004: @"redo:",                 // IDM_EDIT_REDO
-            @42005: @"paste:",                // IDM_EDIT_PASTE
-            @42006: @"delete:",               // IDM_EDIT_DELETE
-            @42007: @"selectAll:",            // IDM_EDIT_SELECTALL
-            @42010: @"duplicateLine:",        // IDM_EDIT_DUP_LINE
-            @42014: @"moveLineUp:",           // IDM_EDIT_LINE_UP
-            @42015: @"moveLineDown:",         // IDM_EDIT_LINE_DOWN
-            @42016: @"convertToUppercase:",   // IDM_EDIT_UPPERCASE
-            @42017: @"convertToLowercase:",   // IDM_EDIT_LOWERCASE
-            @42022: @"toggleLineComment:",    // IDM_EDIT_BLOCK_COMMENT (Ctrl+Q line toggle)
-            @42023: @"addBlockComment:",      // IDM_EDIT_STREAM_COMMENT (Ctrl+Shift+Q)
-            @42024: @"trimTrailingWhitespace:",// IDM_EDIT_TRIMTRAILING
-            @42047: @"removeBlockComment:",   // IDM_EDIT_STREAM_UNCOMMENT
-            // ── Search (IDM_SEARCH = 43000) ──
-            @43002: @"findNext:",             // IDM_SEARCH_FINDNEXT
-            @43010: @"findPrevious:",         // IDM_SEARCH_FINDPREV
-            // ── Format / EOL (IDM_FORMAT = 45000) ──
-            @45001: @"setEOLCRLF:",           // IDM_FORMAT_TODOS
-            @45002: @"setEOLLF:",             // IDM_FORMAT_TOUNIX
-            @45003: @"setEOLCR:",             // IDM_FORMAT_TOMAC
-        };
-    });
-    return map[@(idm)];
-}
+static NSString *_winMacroCmdSelector(long long idm) { return NppSelectorForCommand(idm); }
 
 #pragma mark - Find/Replace macro replay (#166 — Windows mtSavedSnR / type 3)
 
@@ -4441,8 +4546,8 @@ static NSSet<NSString *> *_cLikeLanguages() {
     sptr_t endPos   = [sci message:SCI_GETLINEENDPOSITION wParam:(uptr_t)line];
     if (startPos >= endPos) return NO;
 
-    // Use std::regex (CXX11REGEX) so the `|` alternations in `expr` actually
-    // work — Scintilla's POSIX RESearch treats `|` as a literal pipe.
+    // SCFIND_REGEXP goes to the Boost backend (SCI_OWNREGEX), so the `|`
+    // alternations in `expr` work. (SCFIND_CXX11REGEX is ignored there.)
     [sci message:SCI_SETSEARCHFLAGS wParam:SCFIND_REGEXP | SCFIND_CXX11REGEX];
     [sci message:SCI_SETTARGETRANGE wParam:(uptr_t)startPos lParam:endPos];
 
@@ -4618,8 +4723,8 @@ static NSSet<NSString *> *_cLikeLanguages() {
         sptr_t endPos   = [sci message:SCI_GETLINEENDPOSITION wParam:(uptr_t)prevLine];
 
         if (startPos < endPos) {
-            // Use std::regex (CXX11REGEX) so the `(#|$)` alternation works —
-            // POSIX RESearch would match the parens/pipe literally.
+            // SCFIND_REGEXP goes to the Boost backend (SCI_OWNREGEX), so the
+            // `(#|$)` alternation works. (SCFIND_CXX11REGEX is ignored there.)
             [sci message:SCI_SETSEARCHFLAGS wParam:SCFIND_REGEXP | SCFIND_CXX11REGEX];
             [sci message:SCI_SETTARGETRANGE wParam:(uptr_t)startPos lParam:endPos];
 
@@ -4673,7 +4778,7 @@ static NSSet<NSString *> *_cLikeLanguages() {
     }
 
     // Function parameters hint: auto-trigger after typing '('
-    if (ch == '(' && [[NSUserDefaults standardUserDefaults] boolForKey:kPrefFuncParamsHint]) {
+    if ((ch == '(' || ch == ',' || ch == ')' || [_scintillaView message:SCI_CALLTIPACTIVE]) && [[NSUserDefaults standardUserDefaults] boolForKey:kPrefFuncParamsHint]) {
         [self triggerFunctionParametersHint:nil];
     }
 
@@ -4758,6 +4863,10 @@ static NSSet<NSString *> *_cLikeLanguages() {
     }
 
     switch (notification->nmhdr.code) {
+        case SCN_CALLTIPCLICK:
+            if (notification->position == 1) [self showFunctionParametersPreviousHint:nil];
+            else if (notification->position == 2) [self showFunctionParametersNextHint:nil];
+            break;
         case SCN_MODIFIED:
             if (notification->modificationType & (SC_MOD_INSERTTEXT | SC_MOD_DELETETEXT)) {
                 _isModified = YES;
@@ -5037,57 +5146,75 @@ static NSSet<NSString *> *_cLikeLanguages() {
 #pragma mark - Case Conversion
 
 - (void)convertToUppercase:(id)sender {
-    NSString *sel = [self selectedText]; if (!sel) return;
-    [self replaceSelectionWith:sel.uppercaseString];
+    [_scintillaView message:SCI_UPPERCASE];
 }
 
 - (void)convertToLowercase:(id)sender {
-    NSString *sel = [self selectedText]; if (!sel) return;
-    [self replaceSelectionWith:sel.lowercaseString];
+    [_scintillaView message:SCI_LOWERCASE];
+}
+
+- (void)_transformSelectedText:(NSString *(^)(NSString *))transform {
+    ScintillaView *sci=_scintillaView;
+    NSMutableArray<NSMutableDictionary *> *ranges=[NSMutableArray new];
+    for (sptr_t i=0;i<[sci message:SCI_GETSELECTIONS];i++) {
+        sptr_t anchor=[sci message:SCI_GETSELECTIONNANCHOR wParam:i],caret=[sci message:SCI_GETSELECTIONNCARET wParam:i];
+        [ranges addObject:[@{@"index":@(i),@"anchor":@(anchor),@"caret":@(caret),@"start":@(MIN(anchor,caret)),@"end":@(MAX(anchor,caret))} mutableCopy]];
+    }
+    NSArray *ordered=[ranges sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a,NSDictionary *b){return [a[@"start"] compare:b[@"start"]];}];
+    sptr_t delta=0;
+    for (NSMutableDictionary *r in ordered) {
+        sptr_t start=[r[@"start"] longLongValue],end=[r[@"end"] longLongValue];
+        std::vector<char> bytes((size_t)(end-start)+1);Sci_TextRangeFull tr={{start,end},bytes.data()};
+        [sci message:SCI_GETTEXTRANGEFULL wParam:0 lParam:(sptr_t)&tr];
+        NSString *part=[[NSString alloc] initWithBytes:bytes.data() length:end-start encoding:NSUTF8StringEncoding];
+        NSData *replacement=[(part.length?transform(part):@"") dataUsingEncoding:NSUTF8StringEncoding];
+        r[@"replacement"]=replacement ?: NSData.data;r[@"newStart"]=@(start+delta);r[@"newEnd"]=@(start+delta+replacement.length);
+        delta+=(sptr_t)replacement.length-(end-start);
+    }
+    [sci message:SCI_BEGINUNDOACTION];
+    for (NSDictionary *r in ordered.reverseObjectEnumerator) {
+        sptr_t start=[r[@"start"] longLongValue],end=[r[@"end"] longLongValue];
+        if (start==end) continue;
+        NSData *data=r[@"replacement"];[sci message:SCI_SETTARGETRANGE wParam:start lParam:end];
+        [sci message:SCI_REPLACETARGET wParam:data.length lParam:(sptr_t)data.bytes];
+    }
+    for (NSDictionary *r in ranges) {
+        BOOL forward=[r[@"anchor"] longLongValue]<=[r[@"caret"] longLongValue];
+        [sci message:SCI_SETSELECTIONNANCHOR wParam:[r[@"index"] integerValue] lParam:[r[forward?@"newStart":@"newEnd"] longLongValue]];
+        [sci message:SCI_SETSELECTIONNCARET wParam:[r[@"index"] integerValue] lParam:[r[forward?@"newEnd":@"newStart"] longLongValue]];
+    }
+    [sci message:SCI_ENDUNDOACTION];
 }
 
 - (void)convertToProperCase:(id)sender {
-    NSString *sel = [self selectedText]; if (!sel) return;
-    [self replaceSelectionWith:sel.capitalizedString];
+    [self _transformSelectedText:^NSString *(NSString *part){return part.capitalizedString;}];
 }
-
-- (void)convertToSentenceCase:(id)sender {
-    NSString *sel = [self selectedText]; if (!sel) return;
-    NSMutableString *result = [sel mutableCopy];
-    BOOL nextUpper = YES;
-    for (NSUInteger i = 0; i < result.length; i++) {
-        unichar c = [result characterAtIndex:i];
-        if (nextUpper && isalpha(c)) {
-            [result replaceCharactersInRange:NSMakeRange(i, 1)
-                                  withString:[[NSString stringWithCharacters:&c length:1] uppercaseString]];
-            nextUpper = NO;
-        } else if (c == '.' || c == '!' || c == '?') {
-            nextUpper = YES;
-        }
-    }
-    [self replaceSelectionWith:result];
+- (void)_sentenceCaseBlend:(BOOL)blend {
+    [self _transformSelectedText:^NSString *(NSString *part){
+        NSMutableString *out=[NSMutableString new];__block BOOL first=YES;
+        [part enumerateSubstringsInRange:NSMakeRange(0,part.length) options:NSStringEnumerationByComposedCharacterSequences usingBlock:^(NSString *ch,NSRange range,NSRange enclosing,BOOL *stop){
+            BOOL letter=[ch rangeOfCharacterFromSet:NSCharacterSet.letterCharacterSet].location!=NSNotFound;
+            [out appendString:letter?(first?ch.uppercaseString:blend?ch:ch.lowercaseString):ch];
+            if(letter)first=NO;else if([@".!?" containsString:ch])first=YES;
+        }];return out;
+    }];
 }
-
+- (void)convertToSentenceCase:(id)sender { [self _sentenceCaseBlend:NO]; }
 - (void)convertToInvertedCase:(id)sender {
-    NSString *sel = [self selectedText]; if (!sel) return;
-    NSMutableString *result = [NSMutableString stringWithCapacity:sel.length];
-    for (NSUInteger i = 0; i < sel.length; i++) {
-        unichar c = [sel characterAtIndex:i];
-        NSString *ch = [NSString stringWithCharacters:&c length:1];
-        [result appendString:isupper(c) ? ch.lowercaseString : ch.uppercaseString];
-    }
-    [self replaceSelectionWith:result];
+    [self _transformSelectedText:^NSString *(NSString *part){
+        NSMutableString *out=[NSMutableString new];
+        [part enumerateSubstringsInRange:NSMakeRange(0,part.length) options:NSStringEnumerationByComposedCharacterSequences usingBlock:^(NSString *ch,NSRange range,NSRange enclosing,BOOL *stop){
+            [out appendString:[ch isEqual:ch.lowercaseString]?ch.uppercaseString:ch.lowercaseString];
+        }];return out;
+    }];
 }
-
 - (void)convertToRandomCase:(id)sender {
-    NSString *sel = [self selectedText]; if (!sel) return;
-    NSMutableString *result = [NSMutableString stringWithCapacity:sel.length];
-    for (NSUInteger i = 0; i < sel.length; i++) {
-        unichar c = [sel characterAtIndex:i];
-        NSString *ch = [NSString stringWithCharacters:&c length:1];
-        [result appendString:(arc4random_uniform(2) == 0) ? ch.uppercaseString : ch.lowercaseString];
-    }
-    [self replaceSelectionWith:result];
+    [self _transformSelectedText:^NSString *(NSString *part){
+        NSMutableString *out=[NSMutableString new];
+        [part enumerateSubstringsInRange:NSMakeRange(0,part.length) options:NSStringEnumerationByComposedCharacterSequences usingBlock:^(NSString *ch,NSRange range,NSRange enclosing,BOOL *stop){
+            [out appendString:arc4random_uniform(2)?ch.uppercaseString:ch.lowercaseString];
+        }];return out;
+    }];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -5099,14 +5226,23 @@ static NSSet<NSString *> *_cLikeLanguages() {
     ScintillaView *sci = _scintillaView;
     sptr_t selStart = [sci message:SCI_GETSELECTIONSTART];
     sptr_t selEnd   = [sci message:SCI_GETSELECTIONEND];
-    BOOL hasSelection = (selStart != selEnd);
+    _sortingRectangle = [sci message:SCI_SELECTIONISRECTANGLE] || [sci message:SCI_GETSELECTIONMODE] == SC_SEL_THIN;
+    _sortColumnStart = _sortColumnEnd = 0;
+    if (_sortingRectangle) {
+        sptr_t anchor = [sci message:SCI_GETRECTANGULARSELECTIONANCHOR], caret = [sci message:SCI_GETRECTANGULARSELECTIONCARET];
+        sptr_t ac = [sci message:SCI_GETCOLUMN wParam:anchor] + [sci message:SCI_GETRECTANGULARSELECTIONANCHORVIRTUALSPACE];
+        sptr_t cc = [sci message:SCI_GETCOLUMN wParam:caret] + [sci message:SCI_GETRECTANGULARSELECTIONCARETVIRTUALSPACE];
+        _sortColumnStart = MIN(ac, cc); _sortColumnEnd = MAX(ac, cc);
+        selStart = MIN(anchor,caret); selEnd = MAX(anchor,caret);
+    }
+    BOOL hasSelection = (selStart != selEnd) || _sortingRectangle;
 
     sptr_t lineStart, lineEnd;
     if (hasSelection) {
         lineStart = [sci message:SCI_LINEFROMPOSITION wParam:(uptr_t)selStart];
         lineEnd   = [sci message:SCI_LINEFROMPOSITION wParam:(uptr_t)selEnd];
         // If selection ends at col 0 of the next line, don't include that line
-        if (selEnd == [sci message:SCI_POSITIONFROMLINE wParam:(uptr_t)lineEnd] && lineEnd > lineStart)
+        if (!_sortingRectangle && selEnd == [sci message:SCI_POSITIONFROMLINE wParam:(uptr_t)lineEnd] && lineEnd > lineStart)
             lineEnd--;
     } else {
         lineStart = 0;
@@ -5144,6 +5280,11 @@ static NSSet<NSString *> *_cLikeLanguages() {
 }
 
 - (void)applySortedLines:(NSArray<NSString *> *)lines startPos:(sptr_t)start endPos:(sptr_t)end {
+    sptr_t anchor=[_scintillaView message:SCI_GETRECTANGULARSELECTIONANCHOR];
+    sptr_t caret=[_scintillaView message:SCI_GETRECTANGULARSELECTIONCARET];
+    sptr_t anchorLine=[_scintillaView message:SCI_LINEFROMPOSITION wParam:anchor];
+    sptr_t caretLine=[_scintillaView message:SCI_LINEFROMPOSITION wParam:caret];
+    BOOL reverse=[_scintillaView message:SCI_GETCOLUMN wParam:anchor]>[_scintillaView message:SCI_GETCOLUMN wParam:caret];
     NSString *eol = self.eolName;
     NSString *sep = [eol isEqualToString:@"CRLF"] ? @"\r\n" : [eol isEqualToString:@"CR"] ? @"\r" : @"\n";
     NSString *joined = [lines componentsJoinedByString:sep];
@@ -5156,12 +5297,37 @@ static NSSet<NSString *> *_cLikeLanguages() {
     [_scintillaView message:SCI_REPLACETARGET  wParam:(uptr_t)strlen(joinedUTF8)
                                                lParam:(sptr_t)joinedUTF8];
     [_scintillaView message:SCI_ENDUNDOACTION];
+    if (_sortingRectangle) {
+        sptr_t ac=reverse?_sortColumnEnd:_sortColumnStart, cc=reverse?_sortColumnStart:_sortColumnEnd;
+        sptr_t ap=[_scintillaView message:SCI_FINDCOLUMN wParam:anchorLine lParam:ac];
+        sptr_t cp=[_scintillaView message:SCI_FINDCOLUMN wParam:caretLine lParam:cc];
+        [_scintillaView message:SCI_SETRECTANGULARSELECTIONANCHOR wParam:ap];
+        [_scintillaView message:SCI_SETRECTANGULARSELECTIONCARET wParam:cp];
+        [_scintillaView message:SCI_SETRECTANGULARSELECTIONANCHORVIRTUALSPACE wParam:MAX(0,ac-[_scintillaView message:SCI_GETCOLUMN wParam:ap])];
+        [_scintillaView message:SCI_SETRECTANGULARSELECTIONCARETVIRTUALSPACE wParam:MAX(0,cc-[_scintillaView message:SCI_GETCOLUMN wParam:cp])];
+    }
+}
+
+- (NSString *)_sortKey:(NSString *)line {
+    if (!_sortingRectangle) return line;
+    NSInteger column=0;
+    NSMutableString *key=[NSMutableString new];
+    NSInteger width=MAX(1,[_scintillaView message:SCI_GETTABWIDTH]);
+    for (NSUInteger i=0; i<line.length;) {
+        NSRange r=[line rangeOfComposedCharacterSequenceAtIndex:i];
+        NSString *ch=[line substringWithRange:r];
+        NSInteger next=column+([ch isEqualToString:@"\t"] ? width-column%width : 1);
+        if (next>_sortColumnStart && (_sortColumnEnd==_sortColumnStart || column<_sortColumnEnd)) [key appendString:ch];
+        column=next; i=NSMaxRange(r);
+        if (_sortColumnEnd>_sortColumnStart && column>=_sortColumnEnd) break;
+    }
+    return key;
 }
 
 - (void)sortLinesAscending:(id)sender {
     sptr_t s, e;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
-    [lines sortUsingSelector:@selector(compare:)];
+    [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) { return [[self _sortKey:a] compare:[self _sortKey:b]]; }];
     [self applySortedLines:lines startPos:s endPos:e];
 }
 
@@ -5169,6 +5335,7 @@ static NSSet<NSString *> *_cLikeLanguages() {
     sptr_t s, e;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
     [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        a=[self _sortKey:a]; b=[self _sortKey:b];
         return [b compare:a];
     }];
     [self applySortedLines:lines startPos:s endPos:e];
@@ -5178,6 +5345,7 @@ static NSSet<NSString *> *_cLikeLanguages() {
     sptr_t s, e;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
     [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        a=[self _sortKey:a]; b=[self _sortKey:b];
         return [a caseInsensitiveCompare:b];
     }];
     [self applySortedLines:lines startPos:s endPos:e];
@@ -5187,6 +5355,7 @@ static NSSet<NSString *> *_cLikeLanguages() {
     sptr_t s, e;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
     [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        a=[self _sortKey:a]; b=[self _sortKey:b];
         if (a.length < b.length) return NSOrderedAscending;
         if (a.length > b.length) return NSOrderedDescending;
         return NSOrderedSame;
@@ -5198,6 +5367,7 @@ static NSSet<NSString *> *_cLikeLanguages() {
     sptr_t s, e;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
     [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        a=[self _sortKey:a]; b=[self _sortKey:b];
         if (a.length > b.length) return NSOrderedAscending;
         if (a.length < b.length) return NSOrderedDescending;
         return NSOrderedSame;
@@ -5448,45 +5618,15 @@ static const unsigned int kSCI_GetBidirectional = 2708;
 
 /// Proper Case (Blend): uppercase first letter of each word, leave rest unchanged.
 - (void)convertToProperCaseBlend:(id)sender {
-    NSString *sel = [self selectedText]; if (!sel) return;
-    NSMutableString *result = [sel mutableCopy];
-    BOOL prevWasAlnum = NO;
-    for (NSUInteger i = 0; i < result.length; i++) {
-        unichar c = [result characterAtIndex:i];
-        if ([[NSCharacterSet letterCharacterSet] characterIsMember:c]) {
-            if (!prevWasAlnum) {
-                unichar up = [[[NSString stringWithCharacters:&c length:1] uppercaseString] characterAtIndex:0];
-                [result replaceCharactersInRange:NSMakeRange(i, 1)
-                                     withString:[NSString stringWithCharacters:&up length:1]];
-            }
-            prevWasAlnum = YES;
-        } else {
-            prevWasAlnum = [[NSCharacterSet alphanumericCharacterSet] characterIsMember:c];
-        }
-    }
-    [self replaceSelectionWith:result];
+    [self _transformSelectedText:^NSString *(NSString *part){
+        NSMutableString *out=[NSMutableString new];__block BOOL first=YES;
+        [part enumerateSubstringsInRange:NSMakeRange(0,part.length) options:NSStringEnumerationByComposedCharacterSequences usingBlock:^(NSString *ch,NSRange range,NSRange enclosing,BOOL *stop){
+            BOOL letter=[ch rangeOfCharacterFromSet:NSCharacterSet.letterCharacterSet].location!=NSNotFound;
+            [out appendString:(letter&&first)?ch.uppercaseString:ch];first=!letter;
+        }];return out;
+    }];
 }
-
-/// Sentence case (Blend): uppercase first letter of each sentence, leave rest unchanged.
-- (void)convertToSentenceCaseBlend:(id)sender {
-    NSString *sel = [self selectedText]; if (!sel) return;
-    NSMutableString *result = [sel mutableCopy];
-    BOOL nextUpper = YES;
-    for (NSUInteger i = 0; i < result.length; i++) {
-        unichar c = [result characterAtIndex:i];
-        if ([[NSCharacterSet letterCharacterSet] characterIsMember:c]) {
-            if (nextUpper) {
-                unichar up = [[[NSString stringWithCharacters:&c length:1] uppercaseString] characterAtIndex:0];
-                [result replaceCharactersInRange:NSMakeRange(i, 1)
-                                     withString:[NSString stringWithCharacters:&up length:1]];
-                nextUpper = NO;
-            }
-        } else if (c == '.' || c == '!' || c == '?') {
-            nextUpper = YES;
-        }
-    }
-    [self replaceSelectionWith:result];
-}
+- (void)convertToSentenceCaseBlend:(id)sender { [self _sentenceCaseBlend:YES]; }
 
 // ─────────────────────────────────────────────────────────────────────────────
 #pragma mark - Join Lines / Sort Extensions
@@ -5505,7 +5645,7 @@ static const unsigned int kSCI_GetBidirectional = 2708;
 - (void)sortLinesRandomly:(id)sender {
     sptr_t s, e;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
-    for (NSUInteger i = lines.count - 1; i > 0; i--) {
+    for (NSUInteger i = lines.count ? lines.count - 1 : 0; i > 0; i--) {
         NSUInteger j = arc4random_uniform((uint32_t)(i + 1));
         [lines exchangeObjectAtIndex:i withObjectAtIndex:j];
     }
@@ -5523,6 +5663,7 @@ static const unsigned int kSCI_GetBidirectional = 2708;
     sptr_t s, e;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
     [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        a=[self _sortKey:a]; b=[self _sortKey:b];
         long long va = [a longLongValue];
         long long vb = [b longLongValue];
         return va < vb ? NSOrderedAscending : va > vb ? NSOrderedDescending : NSOrderedSame;
@@ -5534,6 +5675,7 @@ static const unsigned int kSCI_GetBidirectional = 2708;
     sptr_t s, e;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
     [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        a=[self _sortKey:a]; b=[self _sortKey:b];
         long long va = [a longLongValue];
         long long vb = [b longLongValue];
         return va > vb ? NSOrderedAscending : va < vb ? NSOrderedDescending : NSOrderedSame;
@@ -5545,6 +5687,7 @@ static const unsigned int kSCI_GetBidirectional = 2708;
     sptr_t s, e;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
     [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        a=[self _sortKey:a]; b=[self _sortKey:b];
         double va = a.doubleValue;
         double vb = b.doubleValue;
         return va < vb ? NSOrderedAscending : va > vb ? NSOrderedDescending : NSOrderedSame;
@@ -5556,6 +5699,7 @@ static const unsigned int kSCI_GetBidirectional = 2708;
     sptr_t s, e;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
     [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        a=[self _sortKey:a]; b=[self _sortKey:b];
         double va = a.doubleValue;
         double vb = b.doubleValue;
         return va > vb ? NSOrderedAscending : va < vb ? NSOrderedDescending : NSOrderedSame;
@@ -5568,6 +5712,7 @@ static const unsigned int kSCI_GetBidirectional = 2708;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
     NSLocale *commaLocale = [NSLocale localeWithLocaleIdentifier:@"fr_FR"]; // uses comma as decimal separator
     [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        a=[self _sortKey:a]; b=[self _sortKey:b];
         double va = [[NSDecimalNumber decimalNumberWithString:a locale:commaLocale] doubleValue];
         double vb = [[NSDecimalNumber decimalNumberWithString:b locale:commaLocale] doubleValue];
         return va < vb ? NSOrderedAscending : va > vb ? NSOrderedDescending : NSOrderedSame;
@@ -5580,6 +5725,7 @@ static const unsigned int kSCI_GetBidirectional = 2708;
     NSMutableArray *lines = [self linesForSortingStartPos:&s endPos:&e];
     NSLocale *commaLocale = [NSLocale localeWithLocaleIdentifier:@"fr_FR"];
     [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        a=[self _sortKey:a]; b=[self _sortKey:b];
         double va = [[NSDecimalNumber decimalNumberWithString:a locale:commaLocale] doubleValue];
         double vb = [[NSDecimalNumber decimalNumberWithString:b locale:commaLocale] doubleValue];
         return va > vb ? NSOrderedAscending : va < vb ? NSOrderedDescending : NSOrderedSame;
@@ -6121,7 +6267,11 @@ static const unsigned int kSCI_GetBidirectional = 2708;
         if (word.length > prefix.length && [word hasPrefix:prefix])
             [wordSet addObject:word];
     }
+    NppAPICompletion *api = [NppAPICompletion completionForLanguage:_currentLanguage];
+    [wordSet addObjectsFromArray:[api wordsWithPrefix:prefix]];
     [wordSet removeObject:prefix];
+    [sci message:SCI_AUTOCSETIGNORECASE wParam:api.ignoreCase];
+    [sci message:SCI_AUTOCSETORDER wParam:SC_ORDER_PERFORMSORT];
     if (!wordSet.count) { if (beep) NSBeep(); return; }
 
     NSArray<NSString *> *sorted = [wordSet.allObjects
@@ -6132,72 +6282,83 @@ static const unsigned int kSCI_GetBidirectional = 2708;
 }
 
 - (void)triggerFunctionParametersHint:(id)sender {
-    // Show a calltip for the function name preceding the nearest open paren
     ScintillaView *sci = _scintillaView;
+    NppAPICompletion *api = [NppAPICompletion completionForLanguage:_currentLanguage];
+    if (!api.startFunc.length || !api.stopFunc.length) return;
     sptr_t pos = [sci message:SCI_GETCURRENTPOS];
-    // Scan back for the most recent '('
-    sptr_t scan = pos - 1;
-    while (scan >= 0 && (int)[sci message:SCI_GETCHARAT wParam:(uptr_t)scan] != '(') scan--;
-    if (scan < 0) { NSBeep(); return; }
-    sptr_t nameEnd   = scan;
-    sptr_t nameStart = [sci message:SCI_WORDSTARTPOSITION wParam:(uptr_t)nameEnd lParam:1];
-    if (nameStart >= nameEnd) { NSBeep(); return; }
-    sptr_t nameLen = nameEnd - nameStart;
-    char *buf = (char *)calloc((size_t)(nameLen + 1), 1);
-    Sci_TextRangeFull tr = { {(Sci_Position)nameStart, (Sci_Position)nameEnd}, buf };
+    sptr_t first = MAX(0, pos - 65536);
+    first = [sci message:SCI_POSITIONFROMLINE wParam:[sci message:SCI_LINEFROMPOSITION wParam:first]];
+    std::vector<char> bytes((size_t)(pos - first) + 1);
+    Sci_TextRangeFull tr = {{first, pos}, bytes.data()};
     [sci message:SCI_GETTEXTRANGEFULL wParam:0 lParam:(sptr_t)&tr];
-    NSString *funcName = [NSString stringWithUTF8String:buf] ?: @"";
-    free(buf);
-    if (!funcName.length) { NSBeep(); return; }
-    NSString *tip = [NSString stringWithFormat:@"%@( ... )", funcName];
-    [sci message:SCI_CALLTIPSHOW wParam:(uptr_t)nameStart lParam:(sptr_t)tip.UTF8String];
+    struct Call { char close; sptr_t start, end; NSUInteger parameter; };
+    std::vector<Call> calls;
+    char quote = 0; bool lineComment = false, blockComment = false;
+    const char open = (char)[api.startFunc characterAtIndex:0];
+    const char close = (char)[api.stopFunc characterAtIndex:0];
+    const char separator = api.paramSeparator.length ? (char)[api.paramSeparator characterAtIndex:0] : ',';
+    auto wordChar = [&](unsigned char c) { return c >= 128 || isalnum(c) || c == '_' ||
+        [api.additionalWordChars rangeOfString:[NSString stringWithFormat:@"%c", c]].location != NSNotFound; };
+    for (sptr_t i = 0; i < pos - first; i++) {
+        char c = bytes[i], next = bytes[i + 1];
+        if (lineComment) { if (c == '\n' || c == '\r') lineComment = false; continue; }
+        if (blockComment) { if (c == '*' && next == '/') { blockComment = false; i++; } continue; }
+        if (quote) { if (c == '\\') i++; else if (c == quote) quote = 0; continue; }
+        if (c == '/' && next == '/') { lineComment = true; i++; continue; }
+        if (c == '/' && next == '*') { blockComment = true; i++; continue; }
+        if (c == 0x27 || c == '"' || c == '`') { quote = c; continue; }
+        if (c == open || c == '[' || c == '{') {
+            sptr_t end = i, start = i;
+            if (c == open) {
+                while (end > 0 && isspace((unsigned char)bytes[end-1])) end--;
+                start = end;
+                while (start > 0 && wordChar((unsigned char)bytes[start-1])) start--;
+            }
+            calls.push_back({c == '[' ? ']' : c == '{' ? '}' : close, start, end, 0});
+        } else if (!calls.empty() && c == calls.back().close) calls.pop_back();
+        else if (!calls.empty() && c == separator) calls.back().parameter++;
+    }
+    for (auto it = calls.rbegin(); it != calls.rend(); ++it) {
+        if (it->start == it->end) continue;
+        NSString *name = [[NSString alloc] initWithBytes:bytes.data()+it->start length:it->end-it->start encoding:NSUTF8StringEncoding];
+        if (![api overloadsForFunction:name].count) continue;
+        if (![_apiCallName isEqualToString:name]) { _apiCallName = name; _apiOverload = 0; }
+        NSRange highlight;
+        NSString *tip = [api signatureForFunction:name overload:_apiOverload parameter:it->parameter highlight:&highlight];
+        [sci message:SCI_CALLTIPSHOW wParam:first+it->start lParam:(sptr_t)tip.UTF8String];
+        [sci message:SCI_CALLTIPSETHLT wParam:highlight.location lParam:NSMaxRange(highlight)];
+        return;
+    }
+    [sci message:SCI_CALLTIPCANCEL];
 }
 
 - (void)triggerFunctionCompletion:(id)sender {
-    // Show autocomplete using words already in the document (approximates function-name completion).
-    // A full implementation would load per-language API files; this provides useful behaviour without them.
-    [self triggerWordCompletion:sender];
+    ScintillaView *sci = _scintillaView;
+    sptr_t pos = [sci message:SCI_GETCURRENTPOS];
+    sptr_t start = [sci message:SCI_WORDSTARTPOSITION wParam:pos lParam:1];
+    std::vector<char> bytes((size_t)(pos-start)+1);
+    Sci_TextRangeFull tr = {{start,pos},bytes.data()};
+    [sci message:SCI_GETTEXTRANGEFULL wParam:0 lParam:(sptr_t)&tr];
+    NSString *prefix = [NSString stringWithUTF8String:bytes.data()] ?: @"";
+    NppAPICompletion *api = [NppAPICompletion completionForLanguage:_currentLanguage];
+    NSArray *words = [api wordsWithPrefix:prefix];
+    if (!words.count) { [sci message:SCI_AUTOCCANCEL]; return; }
+    NSString *list = [words componentsJoinedByString:@"\n"];
+    [sci message:SCI_AUTOCSETSEPARATOR wParam:'\n'];
+    [sci message:SCI_AUTOCSETIGNORECASE wParam:api.ignoreCase];
+    [sci message:SCI_AUTOCSETORDER wParam:SC_ORDER_PERFORMSORT];
+    [sci message:SCI_AUTOCSHOW wParam:pos-start lParam:(sptr_t)list.UTF8String];
 }
 
 - (void)showFunctionParametersPreviousHint:(id)sender {
-    // Navigate to the previous enclosing function call and show its calltip.
-    ScintillaView *sci = _scintillaView;
-    if ([sci message:SCI_CALLTIPACTIVE]) [sci message:SCI_CALLTIPCANCEL];
-    sptr_t pos = [sci message:SCI_GETCURRENTPOS];
-    int depth = 0;
-    sptr_t scan = pos - 1;
-    while (scan > 0) {
-        char ch = (char)[sci message:SCI_GETCHARAT wParam:(uptr_t)scan];
-        if (ch == ')') { depth++; scan--; continue; }
-        if (ch == '(' && depth > 0) { depth--; scan--; continue; }
-        if (ch == '(') {
-            // Found enclosing '(' — move cursor just inside and show calltip
-            [sci message:SCI_GOTOPOS wParam:(uptr_t)(scan + 1)];
-            [self triggerFunctionParametersHint:sender];
-            return;
-        }
-        scan--;
-    }
-    NSBeep();
+    NppAPICompletion *api = [NppAPICompletion completionForLanguage:_currentLanguage];
+    NSUInteger count = [api overloadsForFunction:_apiCallName ?: @""].count;
+    if (count) _apiOverload = (_apiOverload + count - 1) % count;
+    [self triggerFunctionParametersHint:sender];
 }
-
 - (void)showFunctionParametersNextHint:(id)sender {
-    // Navigate forward to the next function call '(' and show its calltip.
-    ScintillaView *sci = _scintillaView;
-    if ([sci message:SCI_CALLTIPACTIVE]) [sci message:SCI_CALLTIPCANCEL];
-    sptr_t pos = [sci message:SCI_GETCURRENTPOS];
-    sptr_t len = [sci message:SCI_GETLENGTH];
-    sptr_t scan = pos;
-    while (scan < len) {
-        char ch = (char)[sci message:SCI_GETCHARAT wParam:(uptr_t)scan];
-        if (ch == '(') {
-            [sci message:SCI_GOTOPOS wParam:(uptr_t)(scan + 1)];
-            [self triggerFunctionParametersHint:sender];
-            return;
-        }
-        scan++;
-    }
-    NSBeep();
+    _apiOverload++;
+    [self triggerFunctionParametersHint:sender];
 }
 
 - (void)triggerPathCompletion:(id)sender {

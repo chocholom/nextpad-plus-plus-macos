@@ -1,5 +1,7 @@
+#include <vector>
 #import "AppDelegate.h"
 #import "NppPaths.h"
+#import "NppModelXmlMerge.h"
 #import "NppApplication.h"
 #import "MainWindowController.h"
 #import "MenuBuilder.h"
@@ -97,7 +99,25 @@ static void NppRecoveryDone(void) {
     return self;
 }
 
+- (void)_forwardedCommandLine:(NSNotification *)notification {
+    NSArray *args=notification.userInfo[@"arguments"];
+    if (![args isKindOfClass:NSArray.class] || !args.count) return;
+    for (id arg in args) if (![arg isKindOfClass:NSString.class]) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        std::vector<const char *> argv;
+        for (NSString *arg in args) argv.push_back(arg.UTF8String);
+        NppCommandLineParams *cli=[[NppCommandLineParams alloc] initWithArgc:(int)argv.size() argv:argv.data()];
+        MainWindowController *mwc=[self _activeWindowController];
+        [self _openFilesFromCLI:cli inController:mwc];
+        [mwc bringWindowForward];
+    });
+}
+
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
+    [[NSDistributedNotificationCenter defaultCenter] addObserver:self selector:@selector(_forwardedCommandLine:)
+        name:[NSBundle.mainBundle.bundleIdentifier stringByAppendingString:@".OpenCommandLine"]
+        object:[NSString stringWithFormat:@"%d",getpid()]];
+
     // Disable the macOS press-and-hold accent picker so key repeat works in the editor.
     [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"ApplePressAndHoldEnabled"];
 
@@ -111,10 +131,18 @@ static void NppRecoveryDone(void) {
     // Load config.xml preferences before building UI (applies saved XML → NSUserDefaults)
     readConfigXML();
 
+    // Move a never-customised Courier New 10 default in the user's stylers.xml
+    // to the Mac default editor font, before any editor reads the style store.
+    [NPPStyleStore migrateLegacyDefaultEditorFont];
+
     [MenuBuilder buildMainMenu];
 
     // Apply saved shortcut overrides from shortcuts.xml <InternalCommands>
     [self _loadShortcutOverrides];
+
+    // Create langs.xml / stylers.xml, or merge new model entries into them,
+    // before anything reads them.
+    NppInstallUserLangsAndStylers();
 
     // Load built-in language definitions from langs.xml (keywords, extensions, comments).
     [[NppLangsManager shared] loadLangs];
@@ -177,6 +205,11 @@ static void NppRecoveryDone(void) {
 
     // Apply the user's saved language to the freshly-built English menu.
     [[NppLocalizer shared] autoLoad];
+
+    // Pick the editor theme for the current appearance before any EditorView
+    // is built (#370). NPPDarkModeChangedNotification only fires on a change,
+    // so an app launched in dark mode otherwise kept the light theme.
+    [[NPPStyleStore sharedStore] syncThemeWithAppearance];
 
     // Create the primary window
     self.mainWindowController = [[MainWindowController alloc] init];
@@ -363,15 +396,24 @@ static void NppRecoveryDone(void) {
 // ── New Window ──────────────────────────────────────────────────────────────
 
 - (MainWindowController *)openNewWindow {
+    // Offset from the primary window so they don't stack exactly
+    NSRect primaryFrame = self.mainWindowController.window.frame;
+    return [self openNewWindowWithFrame:NSOffsetRect(primaryFrame, 30, -30)];
+}
+
+- (MainWindowController *)openNewWindowWithFrame:(NSRect)newFrame {
     MainWindowController *mwc = [[MainWindowController alloc] init];
     [_windowControllers addObject:mwc];
 
-    // Offset from the primary window so they don't stack exactly
-    NSRect primaryFrame = self.mainWindowController.window.frame;
-    NSRect newFrame = NSOffsetRect(primaryFrame, 30, -30);
-    [mwc.window setFrame:newFrame display:NO];
-
+    // Show first, THEN place. Until a window is first ordered in, its content
+    // size is computed against an estimated title bar plus toolbar height that
+    // is taller than the real one. Moving the still-hidden window here (on top
+    // of the saved frame -init already applied) made AppKit, on showing it,
+    // shrink the frame by that difference AND the content view by it again,
+    // leaving an empty band between the toolbar and the tab bar. The primary
+    // window is shown without this extra move, so it never had the band.
     [mwc showWindow:nil];
+    [mwc.window setFrame:newFrame display:YES];
 
     // Observe close to remove from our array. Keep the returned token and
     // remove the observer when it fires — otherwise the notification center
@@ -394,6 +436,27 @@ static void NppRecoveryDone(void) {
     }];
 
     return mwc;
+}
+
+- (void)windowControllerWillClose:(MainWindowController *)mwc {
+    if (_isTerminating || mwc != self.mainWindowController) return;
+    MainWindowController *next = nil;
+    for (MainWindowController *c in _windowControllers)
+        if (c != mwc && !c.windowHasClosed) { next = c; break; }
+    if (!next) return;
+
+    // Promote the next window. Plugins talk to one window (the primary), so
+    // repoint them too; panels a plugin docked in the closed window are
+    // re-shown by the plugin on its next show request.
+    self.mainWindowController = next;
+    [[NppPluginManager shared] setMainWindowController:next];
+
+    // The primary has no close observer of its own (secondaries get one in
+    // -openNewWindowWithFrame:). Drop it on the next turn, once AppKit is done
+    // delivering this close, so its controller can be released.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.windowControllers removeObject:mwc];
+    });
 }
 
 // ── Folder argument expansion ────────────────────────────────────────────────
@@ -492,7 +555,7 @@ static void NppRecoveryDone(void) {
 
     if (lastEditor) {
         if (cli.language.length) [lastEditor setLanguage:cli.language];
-        if (cli.udlName.length) [lastEditor setLanguage:cli.udlName];
+        if (cli.udlName.length) [lastEditor setLanguage:cli.udlName preferUDL:YES];
         if (cli.readOnly) [lastEditor.scintillaView message:SCI_SETREADONLY wParam:1 lParam:0];
         if (cli.monitorFiles) lastEditor.monitoringMode = YES;
 
@@ -568,15 +631,11 @@ static void NppRecoveryDone(void) {
     // A folder argument expands to its top-level files (issue #131).
     NSArray<NSString *> *files = [self _expandFolderArguments:@[filename]];
     if (files.count == 0) return YES;  // empty folder, or large-open declined
-    MainWindowController *mwc = [self _activeWindowController];
-    for (NSString *path in files) {
-        [mwc openFileAtPath:path];
-    }
     // Issue #63: surface the window to the user. Without this, opening a
     // file from Finder while the app is minimized silently adds the file
     // to a tab inside an invisible window and the user has to hunt for
     // the Dock icon to see it.
-    [mwc bringWindowForward];
+    [self _openFilesAndSurface:files];
     return YES;
 }
 
@@ -589,14 +648,10 @@ static void NppRecoveryDone(void) {
     // Folder arguments expand to their top-level files (issue #131).
     NSArray<NSString *> *files = [self _expandFolderArguments:filenames];
     if (files.count > 0) {
-        MainWindowController *mwc = [self _activeWindowController];
-        for (NSString *path in files) {
-            [mwc openFileAtPath:path];
-        }
         // Issue #63: bring the window forward AFTER all files are added so
         // there's no flicker between batches and the front-most tab is the
         // last one opened (the standard macOS behaviour for multi-file open).
-        [mwc bringWindowForward];
+        [self _openFilesAndSurface:files];
     }
     [sender replyToOpenOrPrint:NSApplicationDelegateReplySuccess];
 }
@@ -632,11 +687,23 @@ static void NppRecoveryDone(void) {
 
     NSArray<NSString *> *files = [self _expandFolderArguments:paths];
     if (files.count == 0) return;  // empty folder, or large-open declined
+    [self _openFilesAndSurface:files];  // activates Nextpad++ over Finder
+}
+
+/// Open `files` in the key window, then bring forward the window showing the
+/// last of them. A file already open in another window is focused there
+/// rather than opened twice, so that window, not the key one, is surfaced.
+- (void)_openFilesAndSurface:(NSArray<NSString *> *)files {
     MainWindowController *mwc = [self _activeWindowController];
+    EditorView *last = nil;
     for (NSString *path in files) {
-        [mwc openFileAtPath:path];
+        EditorView *ed = [mwc openFileAtPath:path];
+        if (ed) last = ed;
     }
-    [mwc bringWindowForward];  // activates Nextpad++ over Finder
+    id owner = last.window.windowController;
+    MainWindowController *front = [owner isKindOfClass:[MainWindowController class]]
+        ? (MainWindowController *)owner : mwc;
+    [front bringWindowForward];
 }
 
 /// Returns the window controller for the key window, or mainWindowController as fallback.

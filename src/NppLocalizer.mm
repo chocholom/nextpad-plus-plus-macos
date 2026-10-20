@@ -541,6 +541,7 @@ static NSString *normalizeForLookup(NSString *s) {
         @"show symbol":                    @"submenu:view-showSymbol",
         @"zoom":                           @"submenu:view-zoom",
         @"move/clone current document":    @"submenu:view-moveCloneDocument",
+        @"move to new window":             @"cmd:10003",  // Windows says "Move to New Instance"
         @"tab":                            @"submenu:view-tab",
         @"fold level":                     @"submenu:view-collapseLevel",
         @"unfold level":                   @"submenu:view-uncollapseLevel",
@@ -644,6 +645,9 @@ static NSString *normalizeForLookup(NSString *s) {
         @"full path a to z":               @"cmd:11004",
         @"full path z to a":               @"cmd:11005",
         @"windows…":                       @"cmd:11001",
+
+        // Find window status lines that Windows keeps in <MiscStrings>
+        @"find: invalid regular expression": @"misc:find-status-invalid-re",
     };
 
     for (NSString *macosKey in aliases) {
@@ -651,6 +655,10 @@ static NSString *normalizeForLookup(NSString *s) {
         NSString *xmlKey = aliases[macosKey];
         NSString *translated = targetRaw[xmlKey];
         if (!translated) continue;
+        // An entry still holding the Windows English text is an untranslated
+        // placeholder (e.g. "Move to New Instance" for "Move to New Window"):
+        // keep the macOS English title rather than show the Windows wording.
+        if ([translated isEqualToString:englishRaw[xmlKey]]) continue;
         NSString *display = stripAccelerators(translated);
         display = [display stringByTrimmingCharactersInSet:
                    [NSCharacterSet whitespaceCharacterSet]];

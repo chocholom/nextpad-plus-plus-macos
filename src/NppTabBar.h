@@ -14,6 +14,28 @@ NS_ASSUME_NONNULL_BEGIN
 /// a new untitled tab in the tab manager that owns `bar`. Optional — bars
 /// with no implementer simply don't react to the gesture.
 - (void)tabBarDidRequestNewTab:(NppTabBar *)bar;
+
+// ── Dragging a tab off the bar ──
+// A drag that leaves the bar (vertically past a small band, or out of its
+// window) detaches the tab. Released over another visible NppTabBar, the tab
+// is offered to that bar; released anywhere else, the delegate decides what
+// happens. A delegate that implements neither of the did… methods keeps every
+// drag inside the bar. `copy` is YES when Option is held at release (Ctrl on
+// Windows): the tab is cloned rather than moved.
+
+/// Whether releasing the tab at `screenPoint`, away from every tab bar, would
+/// do anything. Only used to dim the dragged tab. Defaults to YES.
+- (BOOL)tabBar:(NppTabBar *)bar canReleaseTabAtIndex:(NSInteger)index
+     atScreenPoint:(NSPoint)screenPoint copy:(BOOL)copy;
+/// The tab was released away from every tab bar. `screenPoint` is the pointer
+/// position in screen coordinates. Returns NO when nothing happened; the tab
+/// is then selected, as after a plain click.
+- (BOOL)tabBar:(NppTabBar *)bar didReleaseTabAtIndex:(NSInteger)index
+     atScreenPoint:(NSPoint)screenPoint copy:(BOOL)copy;
+/// The tab was released over `target` (another bar, possibly in another
+/// window) at insertion slot `targetIndex` (0…target.tabCount).
+- (void)tabBar:(NppTabBar *)bar didDropTabAtIndex:(NSInteger)index
+      onTabBar:(NppTabBar *)target atIndex:(NSInteger)targetIndex copy:(BOOL)copy;
 @end
 
 /// Left-aligned tab bar styled after Nextpad++.
@@ -24,6 +46,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) NSInteger tabCount;
 
 - (void)addTabWithTitle:(NSString *)title modified:(BOOL)modified;
+/// Insert a tab at `index` (clamped to 0…tabCount). The selection stays on
+/// the tab that was selected.
+- (void)insertTabWithTitle:(NSString *)title modified:(BOOL)modified atIndex:(NSInteger)index;
 - (void)removeTabAtIndex:(NSInteger)index;
 - (void)setTitle:(NSString *)title modified:(BOOL)modified atIndex:(NSInteger)index;
 - (void)selectTabAtIndex:(NSInteger)index;
@@ -36,11 +61,17 @@ NS_ASSUME_NONNULL_BEGIN
 /// Swap two tab items by index (preserves all properties including pin and color).
 - (void)swapTabAtIndex:(NSInteger)a withIndex:(NSInteger)b;
 
-/// Set a per-tab color identifier (-1 = none/default orange, 0–4 = color 1–5).
+/// Set a per-tab color identifier (-1 = none/default orange, 0–4 = preset colors 1–5, 5 = custom color).
 - (void)setTabColorAtIndex:(NSInteger)index colorId:(NSInteger)colorId;
 /// Returns the color identifier for the tab at index (-1 if none).
 - (NSInteger)tabColorAtIndex:(NSInteger)index;
-/// The fill NSColor for a color identifier (0–4), or nil for -1/none. Lets other
+
+/// Sets an arbitrary custom color on the tab at the specified index, assigning colorId = 5.
+- (void)setTabCustomColor:(NSColor *)color atIndex:(NSInteger)index;
+
+/// Returns the custom color assigned to the tab at index, or nil if uncolored or using a preset palette color.
+- (nullable NSColor *)tabCustomColorAtIndex:(NSInteger)index;
+
 /// UI (e.g. the Document List) tint records to match a colored tab.
 + (nullable NSColor *)tabFillColorForId:(NSInteger)colorId;
 
