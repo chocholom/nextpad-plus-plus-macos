@@ -548,6 +548,7 @@ if(NPP_BUILD_TESTS)
     add_executable(test_search_core EXCLUDE_FROM_ALL
         "${NPP_TEST_ROOT}/test_search_core.mm"
         "${NPP_TEST_ROOT}/PlatformStubs.cxx"
+        src/NppFileFilter.mm
         src/SearchCore.mm
         src/NppTextEncoding.mm)
 
