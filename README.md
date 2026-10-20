@@ -1,5 +1,11 @@
 # Nextpad++ for macOS
 
+> **Mirek's integration fork:** this branch combines the macOS fixes and features
+> listed in the [integration report](docs/macos-integration-2026-10-20.md), including
+> the startup/file-opening correction. Start with the
+> [rebuild and upstream-update guide](BUILDING-INTEGRATION.md). Custom builds are
+> ad-hoc signed; the upstream notarization claims below describe upstream releases.
+
 **The full native port of Notepad++ to macOS.** A full port of the original [Notepad++](https://notepad-plus-plus.org) codebase — not a rewrite, not an alternative, not Wine.
 
 <p align="center">

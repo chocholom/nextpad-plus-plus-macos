@@ -1,0 +1,21 @@
+{
+  "sourceCommit": "a25e53bfb051f1f22dc9662059c8818309ad7154",
+  "tag": "mirek-integration-2026.10.20.1",
+  "buildNumber": "2026.10.20.1",
+  "macOS": "26.5.1 (25F80)",
+  "xcode": "26.5 (17F42)",
+  "clang": "Apple clang 21.0.0 (clang-2100.1.1.101)",
+  "cmake": "4.3.4",
+  "ninja": "1.13.2",
+  "python": "3.14.8",
+  "runtimeTestArchitecture": "arm64",
+  "binaryArchitectures": ["arm64", "x86_64"],
+  "deploymentTarget": "macOS 11.0",
+  "signing": "ad-hoc; not notarized",
+  "archiveSHA256": "bc7115c5ea0080c6c0f792bb5ed01ac750874eb25b581a396ebc7de1cf7e2b95",
+  "validation": {
+    "nativeChecks": 87,
+    "headlessSuites": 6,
+    "fileOpenChecksIncludingSuppliedCSV": 4
+  }
+}
