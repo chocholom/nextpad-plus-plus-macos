@@ -22,7 +22,9 @@ static NSString *NppComputeConfigDir(void) {
         appSupport = [NSHomeDirectory()
             stringByAppendingPathComponent:@"Library/Application Support"];
     }
-    return [appSupport stringByAppendingPathComponent:@"Nextpad++"];
+    NSString *profile=[NSBundle.mainBundle objectForInfoDictionaryKey:@"NextpadSettingsProfile"];
+    if (![profile isKindOfClass:NSString.class] || !profile.length || ![profile.lastPathComponent isEqual:profile]) profile=@"Nextpad++";
+    return [appSupport stringByAppendingPathComponent:profile];
 }
 
 // Recursively move everything under `src` into `dst`, NEVER overwriting an

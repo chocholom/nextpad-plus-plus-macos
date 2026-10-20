@@ -59,6 +59,14 @@ static void pump(void) {
 
 int main(void) { @autoreleasepool {
     setbuf(stdout,NULL);
+    NSPasteboard *clipboard=NSPasteboard.generalPasteboard;
+    NSMutableArray<NSDictionary *> *clipboardSnapshot=[NSMutableArray new];
+    for(NSPasteboardItem *item in clipboard.pasteboardItems) {
+        NSMutableDictionary *values=[NSMutableDictionary new];
+        for(NSPasteboardType type in item.types) { NSData *value=[item dataForType:type];if(value)values[type]=value; }
+        [clipboardSnapshot addObject:values];
+    }
+    NSInteger clipboardOwnedChange=-1;
     NSString *root=[NSTemporaryDirectory() stringByAppendingPathComponent:[@"nextpad-native-" stringByAppendingString:NSUUID.UUID.UUIDString]];
     [[NSFileManager defaultManager] createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:nil];
     NppSetConfigDirOverride([root stringByAppendingPathComponent:@"profile"]);
@@ -118,7 +126,7 @@ int main(void) { @autoreleasepool {
         [file.results addObject:result];NPPFindOptions *opts=[NPPFindOptions new];opts.searchText=@"hello";
         [panel addResults:@[file] forSearchText:@"hello" options:opts filesSearched:1];
         ScintillaView *results=[panel valueForKey:@"sci"];
-        [results message:SCI_GOTOLINE wParam:2];[panel _copyLines:nil];
+        [results message:SCI_GOTOLINE wParam:2];[panel _copyLines:nil];clipboardOwnedChange=clipboard.changeCount;
         check([[NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString] isEqual:@"hello: Line 9: café\n"],@"copy results excludes only generated metadata");
         [panel addResults:@[] forSearchText:@"absent" options:opts filesSearched:3];
         check([results.string containsString:@"Search \"absent\" (0 hits"],@"zero-hit search adds its own history header");
@@ -202,11 +210,25 @@ int main(void) { @autoreleasepool {
         [NSUserDefaults.standardUserDefaults setBool:NO forKey:kPrefExitOnCloseLastTab];
         TabManager *emptyManager=[TabManager new];[emptyManager addNewTab];[emptyManager closeCurrentTab];
         check(emptyManager.allEditors.count==1,@"closing the last tab leaves a blank tab when exit is disabled");
+        // Dispatch through the plugin message bridge, not only its lookup table.
+        EditorView *commandEditor=window.currentEditor;
+        commandEditor.scintillaView.string=@"word";
+        [commandEditor.scintillaView message:SCI_SELECTALL];
+        check([plugins handleNppMessage:NPPM_MENUCOMMAND wParam:0 lParam:42016],@"plugin bridge accepts a mapped Windows menu command");
+        pump();check([commandEditor.scintillaView.string isEqual:@"WORD"],@"plugin menu command reaches the active editor");
+        check(![plugins handleNppMessage:NPPM_MENUCOMMAND wParam:0 lParam:999999],@"plugin bridge rejects an unknown command");
+        NppThemeManager *theme=[NppThemeManager shared];
+        theme.mode=NppDarkModeDark;[store syncThemeWithAppearance];
+        check([store.activeThemeName isEqual:[store themeNameForDarkAppearance:YES]] && [NppThemeManager isDarkColor:store.globalBg],@"dark mode selects the remembered dark editor theme");
+        theme.mode=NppDarkModeLight;[store syncThemeWithAppearance];
+        check([store.activeThemeName isEqual:[store themeNameForDarkAppearance:NO]] && ![NppThemeManager isDarkColor:store.globalBg],@"light mode restores the remembered light editor theme");
         // Session snapshots preserve unsaved contents and never replace a
         // conflicting modified buffer already open in this window.
         EditorView *unsaved=[manager addNewTab];unsaved.customTabName=@"scratch";
         unsaved.scintillaView.string=@"untitled café\n";
-        EditorView *original=window.currentEditor;
+        EditorView *original=nil;
+        for(EditorView *candidate in manager.allEditors) if([candidate.filePath isEqual:source]) { original=candidate;break; }
+        NSString *originalSnapshot=original.scintillaView.string;
         [window saveSessionToPath:sessionFile];
         NSDictionary *withUntitled=[NSDictionary dictionaryWithContentsOfFile:sessionFile];
         check([withUntitled[@"tabs"] filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDictionary *item,NSDictionary *bindings){return [item[@"displayName"] isEqual:@"scratch"] && [item[@"content"] length]>0;}]].count==1,@"named session snapshots unsaved text");
@@ -215,7 +237,9 @@ int main(void) { @autoreleasepool {
         check(foundScratch,@"named session restores untitled text without a backing file");
         original.scintillaView.string=@"newer unsaved text";
         [window loadSessionFromPath:sessionFile];
-        check([original.scintillaView.string isEqual:@"newer unsaved text"],@"named session leaves conflicting unsaved text untouched");
+        BOOL restoredConflictCopy=NO;
+        for(EditorView *candidate in manager.allEditors) if(candidate!=original && !candidate.filePath.length && [candidate.scintillaView.string isEqual:originalSnapshot]) restoredConflictCopy=YES;
+        check(original && [original.scintillaView.string isEqual:@"newer unsaved text"] && restoredConflictCopy,@"named session preserves a modified file and restores the conflicting snapshot separately");
         EditorView *rect=[manager addNewTab];rect.scintillaView.string=@"one\ntwo\nthree\n";
         [rect.scintillaView message:SCI_SETSELECTIONMODE wParam:SC_SEL_RECTANGLE];
         [rect.scintillaView message:SCI_SETRECTANGULARSELECTIONANCHOR wParam:1];
@@ -247,6 +271,21 @@ int main(void) { @autoreleasepool {
         NSMenuItem *plus=[NSMenuItem new],*minus=[NSMenuItem new];
         NppApplyShortcutToMenuItem(plus,187,YES,NO,NO,NO);NppApplyShortcutToMenuItem(minus,189,YES,NO,NO,NO);
         check([plus.keyEquivalent isEqual:@"="] && [minus.keyEquivalent isEqual:@"-"],@"shortcut mapper supports plus and minus menu equivalents");
+        // Issue #267: verify persisted Scintilla scroll shortcuts through
+        // Cocoa key dispatch rather than invoking SCI_LINESCROLL directly.
+        NSString *shortcuts=NppConfigSubpath(@"shortcuts.xml");NSData *oldShortcuts=[NSData dataWithContentsOfFile:shortcuts];
+        [@"<NotepadPlus><ScintillaKeys><ScintKey ScintID='2342' Key='74' Cmd='no' Ctrl='yes' Alt='yes' Shift='no'/><ScintKey ScintID='2343' Key='75' Cmd='no' Ctrl='yes' Alt='yes' Shift='no'/></ScintillaKeys></NotepadPlus>" writeToFile:shortcuts atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [keys applyScintillaKeyOverrides];
+        keys.scintillaView.string=[@"line\n" stringByPaddingToLength:1500 withString:@"line\n" startingAtIndex:0];
+        [keys layoutSubtreeIfNeeded];[keys.scintillaView message:SCI_SETFIRSTVISIBLELINE wParam:20];
+        sptr_t first=[keys.scintillaView message:SCI_GETFIRSTVISIBLELINE];
+        NSEvent *scrollDown=[NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:NSEventModifierFlagControl|NSEventModifierFlagOption timestamp:0 windowNumber:0 context:nil characters:@"j" charactersIgnoringModifiers:@"j" isARepeat:NO keyCode:38];
+        [keys.scintillaView.content keyDown:scrollDown];
+        check([keys.scintillaView message:SCI_GETFIRSTVISIBLELINE]==first+1,@"persisted SCI_LINESCROLLDOWN shortcut scrolls through Cocoa key handling");
+        NSEvent *scrollUp=[NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:NSEventModifierFlagControl|NSEventModifierFlagOption timestamp:0 windowNumber:0 context:nil characters:@"k" charactersIgnoringModifiers:@"k" isARepeat:NO keyCode:40];
+        [keys.scintillaView.content keyDown:scrollUp];
+        check([keys.scintillaView message:SCI_GETFIRSTVISIBLELINE]==first,@"persisted SCI_LINESCROLLUP shortcut scrolls through Cocoa key handling");
+        if(oldShortcuts) [oldShortcuts writeToFile:shortcuts atomically:YES];
         // Exercise the receiver against the real controller and the sender in
         // a second process, with the same private bundle ID as this test app.
         NSString *cliFile=[root stringByAppendingPathComponent:@"from cli.py"];
@@ -279,5 +318,14 @@ int main(void) { @autoreleasepool {
     printf("%d checks, %d failures\n",checks,failures);
     // All persistent state is confined to this test's profile and defaults domain.
     [[NSUserDefaults standardUserDefaults] removePersistentDomainForName:NSBundle.mainBundle.bundleIdentifier];
+    if(clipboardOwnedChange==clipboard.changeCount) {
+        NSMutableArray *items=[NSMutableArray new];
+        for(NSDictionary *values in clipboardSnapshot) {
+            NSPasteboardItem *item=[NSPasteboardItem new];
+            for(NSPasteboardType type in values) [item setData:values[type] forType:type];
+            [items addObject:item];
+        }
+        [clipboard clearContents];if(items.count)[clipboard writeObjects:items];
+    }
     return failures?1:0;
 } }

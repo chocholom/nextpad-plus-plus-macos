@@ -1,0 +1,428 @@
+{
+  "schemaVersion": 1,
+  "completedOn": "2026-10-20",
+  "reviewStartedOn": "2026-10-15",
+  "upstream": "nextpad-plus-plus/nextpad-plus-plus-macos",
+  "sourceRepository": "chocholom/nextpad-plus-plus-macos",
+  "sourceBranch": "integration/macos-parity-20261020",
+  "baselineCommit": "ba956f5536ad063a4ea339e7c9569db5388af766",
+  "notepadPlusPlusReferenceCommit": "f68849b21529bfe8acbccf0255c4cc421402d6bc",
+  "componentVersions": {
+    "Scintilla": "5.6.6",
+    "Lexilla": "5.5.3"
+  },
+  "dependencies": {
+    "389": [
+      379
+    ],
+    "401": [
+      387
+    ],
+    "403": [
+      377
+    ],
+    "426": [
+      372
+    ],
+    "433": [
+      403,
+      377
+    ]
+  },
+  "pullRequests": [
+    {
+      "number": 372,
+      "title": "Detect line endings and apply new-document EOL preference",
+      "kind": "existing",
+      "headCommit": "0102d841106205cd094ee4b01daa118dbe86fdbd",
+      "patchBase": "4d391f0e8399a47bc96c62f45cb16980c6b6f329",
+      "issues": [
+        371
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/372"
+    },
+    {
+      "number": 374,
+      "title": "Reserve non-overlapping plugin marker and indicator IDs",
+      "kind": "existing",
+      "headCommit": "b60d95a8065fc3f73da2b72962e7a0a4c0986bf6",
+      "patchBase": "4d391f0e8399a47bc96c62f45cb16980c6b6f329",
+      "issues": [
+        373
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/374"
+    },
+    {
+      "number": 357,
+      "title": "Option-Shift arrow word selection",
+      "kind": "existing",
+      "headCommit": "b0a5e1149981f8397f2f4b9e22c076677914883f",
+      "patchBase": "a795ef7f11da60a3cf31b0d845f63589f28877f7",
+      "issues": [
+        415
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/357"
+    },
+    {
+      "number": 293,
+      "title": "Assignable plus/minus shortcuts",
+      "kind": "existing",
+      "headCommit": "b76decee9903200ff20dba3953a4b34e40c2f52d",
+      "patchBase": "5c8ca41de15835c63034475b545a97ed6ad1be8e",
+      "issues": [
+        270
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/293"
+    },
+    {
+      "number": 407,
+      "title": "Middle-click tab close",
+      "kind": "existing",
+      "headCommit": "721b78cce8f7e124f6edf34e195d604ad6a6bf90",
+      "patchBase": "4d391f0e8399a47bc96c62f45cb16980c6b6f329",
+      "issues": [
+        416
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/407"
+    },
+    {
+      "number": 405,
+      "title": "Clear unsaved-tab indicators",
+      "kind": "existing",
+      "headCommit": "422efd1ad9212ab2cf264149214ab4dc90b1850c",
+      "patchBase": "4d391f0e8399a47bc96c62f45cb16980c6b6f329",
+      "issues": [
+        404
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/405"
+    },
+    {
+      "number": 398,
+      "title": "Theme-aware side panels",
+      "kind": "existing",
+      "headCommit": "28097579adb362efbcc6e648ad1fa3c78b651804",
+      "patchBase": "4d391f0e8399a47bc96c62f45cb16980c6b6f329",
+      "issues": [
+        396
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/398"
+    },
+    {
+      "number": 399,
+      "title": "Shared-document themed Document Map",
+      "kind": "existing",
+      "headCommit": "9caa938386a5082950060bed484f19ccea7f31f4",
+      "patchBase": "4d391f0e8399a47bc96c62f45cb16980c6b6f329",
+      "issues": [
+        397
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/399"
+    },
+    {
+      "number": 375,
+      "title": "Remember light/dark editor themes and follow appearance",
+      "kind": "existing",
+      "headCommit": "910ab440de9307ca27ac8a83d4e1faef2bb96bff",
+      "patchBase": "4d391f0e8399a47bc96c62f45cb16980c6b6f329",
+      "issues": [
+        366,
+        370,
+        423
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/375"
+    },
+    {
+      "number": 377,
+      "title": "Cancelable Find in Files and legacy text encodings",
+      "kind": "existing",
+      "headCommit": "e58f4cc4ca48ecb627071262298624f511b215a0",
+      "patchBase": "6940f3687e802111af1ff243fdbea855c6a94008",
+      "issues": [
+        376
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/377"
+    },
+    {
+      "number": 379,
+      "title": "Save edits from User Defined Language dialog",
+      "kind": "existing",
+      "headCommit": "0d0d1efb8e4aab3b3fe47f86b5acf743d14e77a1",
+      "patchBase": "6940f3687e802111af1ff243fdbea855c6a94008",
+      "issues": [
+        378
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/379"
+    },
+    {
+      "number": 381,
+      "title": "Native fonts and cancellable tab-close tracking",
+      "kind": "existing",
+      "headCommit": "6d8888c03d22fddd184d2bca2586b46038a3cf40",
+      "patchBase": "6940f3687e802111af1ff243fdbea855c6a94008",
+      "issues": [
+        380
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/381"
+    },
+    {
+      "number": 387,
+      "title": "Correct lexer keyword-list slots",
+      "kind": "existing",
+      "headCommit": "cc43827f07bda09ebecfd59f1cedbf91e2c15ba7",
+      "patchBase": "4d391f0e8399a47bc96c62f45cb16980c6b6f329",
+      "issues": [
+        386
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/387"
+    },
+    {
+      "number": 395,
+      "title": "Merge updated models into existing user XML",
+      "kind": "existing",
+      "headCommit": "38a7a53d48f9397ca507a4274d1ba5e6f4885bcd",
+      "patchBase": "4d391f0e8399a47bc96c62f45cb16980c6b6f329",
+      "issues": [
+        394
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/395"
+    },
+    {
+      "number": 393,
+      "title": "Distinct C/Objective-C/TypeScript styles and theme layers",
+      "kind": "existing",
+      "headCommit": "7217f0e816660f8e47d9617c2560832ae8e5f835",
+      "patchBase": "4d391f0e8399a47bc96c62f45cb16980c6b6f329",
+      "issues": [
+        392
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/393"
+    },
+    {
+      "number": 391,
+      "title": "Tab tear-off and cross-window movement",
+      "kind": "existing",
+      "headCommit": "a4f3169f685cdc4cab7ece30785cf1431ba3304e",
+      "patchBase": "4d391f0e8399a47bc96c62f45cb16980c6b6f329",
+      "issues": [
+        390
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/391"
+    },
+    {
+      "number": 411,
+      "title": "Restore recently closed file",
+      "kind": "existing",
+      "headCommit": "16b90fcc9b3ec54a0fe0428235a462078802399a",
+      "patchBase": "6940f3687e802111af1ff243fdbea855c6a94008",
+      "issues": [
+        410
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/411"
+    },
+    {
+      "number": 414,
+      "title": "Exit-on-last-tab preference",
+      "kind": "existing",
+      "headCommit": "d14950989e611822d949dcacc4f3d72d1ad6da5e",
+      "patchBase": "871e651454c30e5b80097c7587cc86b98197bc74",
+      "issues": [
+        369
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/414"
+    },
+    {
+      "number": 365,
+      "title": "Custom default tab colours",
+      "kind": "existing",
+      "headCommit": "559c9b4faf70e71131ed79d7f61c701e5e1554e7",
+      "patchBase": "871e651454c30e5b80097c7587cc86b98197bc74",
+      "issues": [
+        359
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/365"
+    },
+    {
+      "number": 389,
+      "title": "UDL nesting, colours, fonts and extension precedence",
+      "kind": "existing",
+      "headCommit": "380894ae6b1d75a01eaa3a2aae59865f10564e60",
+      "patchBase": "6940f3687e802111af1ff243fdbea855c6a94008",
+      "issues": [
+        388
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/389"
+    },
+    {
+      "number": 401,
+      "title": "Lexer substyles and Style Configurator keywords",
+      "kind": "existing",
+      "headCommit": "96d586d2bbb0c2284bc5d6e90e0ab46a7fb4143c",
+      "patchBase": "4d391f0e8399a47bc96c62f45cb16980c6b6f329",
+      "issues": [
+        400
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/401"
+    },
+    {
+      "number": 403,
+      "title": "One Boost search engine and headless tests",
+      "kind": "existing",
+      "headCommit": "1c9a40c5ec1e19c6a665df1b4e98b0d9c4aef795",
+      "patchBase": "6940f3687e802111af1ff243fdbea855c6a94008",
+      "issues": [
+        402
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/403"
+    },
+    {
+      "number": 424,
+      "title": "Fix selections, search results and status legibility",
+      "kind": "new",
+      "headCommit": "650b70574c8efa73a1ff1103c8c1d7666f163e24",
+      "patchBase": "ba956f5536ad063a4ea339e7c9569db5388af766",
+      "issues": [
+        413,
+        418,
+        408,
+        419,
+        305
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/424"
+    },
+    {
+      "number": 426,
+      "title": "Preserve loaded EOL mode through theme changes",
+      "kind": "new",
+      "headCommit": "85a4ad9f2162093dd18800f719d96959a3e26399",
+      "patchBase": "4d391f0e8399a47bc96c62f45cb16980c6b6f329",
+      "issues": [
+        371
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/426"
+    },
+    {
+      "number": 427,
+      "title": "API XML completion and real parameter hints",
+      "kind": "new",
+      "headCommit": "9d2afa8dad7afb6d817cb8dfdb1b40b9de3d0838",
+      "patchBase": "ba956f5536ad063a4ea339e7c9569db5388af766",
+      "issues": [],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/427"
+    },
+    {
+      "number": 428,
+      "title": "Rectangular sorting and Unicode multiple-selection case conversion",
+      "kind": "new",
+      "headCommit": "1af7c9cc69c8377694ce2b13ddf487923158cace",
+      "patchBase": "ba956f5536ad063a4ea339e7c9569db5388af766",
+      "issues": [],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/428"
+    },
+    {
+      "number": 429,
+      "title": "CLI forwarding and settings-directory startup",
+      "kind": "new",
+      "headCommit": "8e70401ed36f8e6a69c158d396a95f4514f1c2f1",
+      "patchBase": "ba956f5536ad063a4ea339e7c9569db5388af766",
+      "issues": [
+        422
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/429"
+    },
+    {
+      "number": 430,
+      "title": "Boost-compatible Function List parsers",
+      "kind": "new",
+      "headCommit": "2d5ffc9c24a0bb1ed3d8004949895bb10086f50f",
+      "patchBase": "ba956f5536ad063a4ea339e7c9569db5388af766",
+      "issues": [],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/430"
+    },
+    {
+      "number": 431,
+      "title": "VoiceOver tab accessibility",
+      "kind": "new",
+      "headCommit": "2e6cd7e550ec4fb0cdab416436cd33abda6b9175",
+      "patchBase": "ba956f5536ad063a4ea339e7c9569db5388af766",
+      "issues": [
+        406
+      ],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/431"
+    },
+    {
+      "number": 432,
+      "title": "Named session state and unsaved text",
+      "kind": "new",
+      "headCommit": "f07879a9b432f1872c08b8c18ceffb5a344833c5",
+      "patchBase": "ba956f5536ad063a4ea339e7c9569db5388af766",
+      "issues": [],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/432"
+    },
+    {
+      "number": 433,
+      "title": "File and directory exclusion filters",
+      "kind": "new",
+      "headCommit": "988ec8bdb55cdc33882ec3b0159e07dea776afc2",
+      "patchBase": "6940f3687e802111af1ff243fdbea855c6a94008",
+      "issues": [],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/433"
+    },
+    {
+      "number": 434,
+      "title": "Shared plugin and macro command map",
+      "kind": "new",
+      "headCommit": "e4f58e101b41a624d551ef3b9b4580898c76d9b6",
+      "patchBase": "ba956f5536ad063a4ea339e7c9569db5388af766",
+      "issues": [],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/434"
+    },
+    {
+      "number": 435,
+      "title": "Scintilla 5.6.6 and Lexilla 5.5.3",
+      "kind": "new",
+      "headCommit": "20dde55218a5e20688e8c6fbb9a066461433a952",
+      "patchBase": "ba956f5536ad063a4ea339e7c9569db5388af766",
+      "issues": [],
+      "url": "https://github.com/nextpad-plus-plus/nextpad-plus-plus-macos/pull/435"
+    }
+  ],
+  "validation": {
+    "nativeRuntimeArchitecture": "arm64",
+    "compiledArchitectures": [
+      "arm64",
+      "x86_64"
+    ],
+    "headlessSuites": 6,
+    "XMLResourcesParsed": 37,
+    "note": "See the adjacent report and validation logs for behavior coverage; commit inclusion is not semantic proof.",
+    "nativeChecks": 83,
+    "scrollShortcutIssue267": "Verified persisted SCI_LINESCROLLDOWN/UP bindings through Cocoa key dispatch."
+  },
+  "remainingProjects": [
+    {
+      "issues": [
+        368
+      ],
+      "description": "Native NppExec port; Windows DLL binaries remain incompatible."
+    },
+    {
+      "issues": [
+        417
+      ],
+      "description": "Redesign automatic update/installation UX."
+    },
+    {
+      "issues": [
+        91,
+        106
+      ],
+      "description": "iPadOS/iOS ports."
+    },
+    {
+      "issues": [
+        420
+      ],
+      "description": "JSTool on Linux; separate platform/repository."
+    }
+  ]
+}

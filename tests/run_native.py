@@ -22,8 +22,11 @@ with (contents / "Info.plist").open("wb") as stream:
                   "CFBundleExecutable": "native_tests", "CFBundlePackageType": "APPL",
                   "CFBundleName": "Nextpad Regression Tests"}, stream)
 resources = contents / "Resources"
+resource_target=build / "Nextpad++.app/Contents/Resources"
+if resources.is_symlink() and resources.readlink()!=resource_target:
+    resources.unlink()
 if not resources.exists():
-    resources.symlink_to(build / "Nextpad++.app/Contents/Resources", target_is_directory=True)
+    resources.symlink_to(resource_target, target_is_directory=True)
 objects = sorted((build / "CMakeFiles/NotepadPlusPlusMac.dir/src").glob("*.o"))
 objects = [str(path) for path in objects if path.name != "main.mm.o"]
 assert objects, "Build the application first"
