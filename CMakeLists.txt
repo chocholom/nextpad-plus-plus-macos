@@ -459,6 +459,7 @@ endforeach()
 # remember TCC permission grants (Downloads, Desktop, Documents) across launches.
 # Strip extended attributes first (resource forks / Finder info break codesign).
 add_custom_command(TARGET NotepadPlusPlusMac POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/resources/autoCompletion" "$<TARGET_BUNDLE_DIR:NotepadPlusPlusMac>/Contents/Resources/autoCompletion"
     COMMAND xattr -cr "$<TARGET_BUNDLE_DIR:NotepadPlusPlusMac>"
     COMMAND codesign --force --deep --sign - "$<TARGET_BUNDLE_DIR:NotepadPlusPlusMac>"
     COMMENT "Ad-hoc code signing the app bundle")
@@ -491,5 +492,4 @@ set_source_files_properties(${APP_SRCS} PROPERTIES
     COMPILE_FLAGS "-fobjc-arc"
 )
 
-add_custom_command(TARGET NotepadPlusPlusMac POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/resources/autoCompletion" "$<TARGET_BUNDLE_DIR:NotepadPlusPlusMac>/Contents/Resources/autoCompletion")
+
