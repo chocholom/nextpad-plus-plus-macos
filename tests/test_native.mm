@@ -23,6 +23,7 @@
 #import "MenuBuilder.h"
 #import "AppDelegate.h"
 #import "NppCommandLineParams.h"
+#import "FindWindow.h"
 #include "Scintilla.h"
 #include <sys/stat.h>
 
@@ -36,6 +37,7 @@
 - (void)_copyLines:(id)sender;
 @end
 @interface MainWindowController (Testing)
+- (void)windowDidBecomeKey:(NSNotification *)notification;
 - (void)saveSessionToPath:(NSString *)path;
 - (void)updateStatusBar;
 - (NSArray<EditorView *> *)allOpenEditors;
@@ -77,6 +79,7 @@ int main(void) { @autoreleasepool {
     [MenuBuilder buildMainMenu];
     [NSUserDefaults.standardUserDefaults registerDefaults:@{kPrefEOLType:@1,kPrefTabCloseButton:@YES,kPrefAutoCompleteEnable:@NO,kPrefLargeFileEnabled:@NO,kPrefTabWidth:@4}];
     @try {
+        check([FindWindow existingWindow] == nil,@"window focus can query the Find singleton without creating it");
         for (NSString *ending in @[@"\r\n",@"\r",@"\n"]) {
             NSString *path=[root stringByAppendingPathComponent:@"eol.txt"];
             NSString *input=[NSString stringWithFormat:@"one%@two%@",ending,ending];
@@ -193,6 +196,11 @@ int main(void) { @autoreleasepool {
         NSString *sessionFile=[root stringByAppendingPathComponent:@"session.plist"], *source=[root stringByAppendingPathComponent:@"session.c"];
         [@"int main() {\n return 0;\n}\n" writeToFile:source atomically:YES encoding:NSUTF8StringEncoding error:nil];
         MainWindowController *window=[MainWindowController new];EditorView *sessionEd=[window openFileAtPath:source];
+        [window windowDidBecomeKey:[NSNotification notificationWithName:NSWindowDidBecomeKeyNotification object:window.window]];
+        check([FindWindow existingWindow] == nil,@"activating a document window does not create the Find window");
+        FindWindow *findWindow=[FindWindow sharedWindow];
+        [window windowDidBecomeKey:[NSNotification notificationWithName:NSWindowDidBecomeKeyNotification object:window.window]];
+        check([FindWindow existingWindow] == findWindow && findWindow.delegate == (id)window,@"activating a document window retargets the existing Find window");
         [sessionEd.scintillaView message:SCI_SETSEL wParam:2 lParam:8];[sessionEd.scintillaView message:SCI_MARKERADD wParam:1 lParam:20];
         [window saveSessionToPath:sessionFile];
         NSDictionary *snapshot=[NSDictionary dictionaryWithContentsOfFile:sessionFile];NSDictionary *saved=snapshot[@"tabs"][0];
@@ -233,6 +241,8 @@ int main(void) { @autoreleasepool {
         NSDictionary *withUntitled=[NSDictionary dictionaryWithContentsOfFile:sessionFile];
         check([withUntitled[@"tabs"] filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDictionary *item,NSDictionary *bindings){return [item[@"displayName"] isEqual:@"scratch"] && [item[@"content"] length]>0;}]].count==1,@"named session snapshots unsaved text");
         MainWindowController *restored=[MainWindowController new];[restored loadSessionFromPath:sessionFile];
+        [restored windowDidBecomeKey:[NSNotification notificationWithName:NSWindowDidBecomeKeyNotification object:restored.window]];
+        check(findWindow.delegate == (id)restored,@"switching document windows retargets Find to the active document");
         BOOL foundScratch=NO;for(EditorView *candidate in [restored allOpenEditors]) if([candidate.scintillaView.string isEqual:@"untitled café\n"] && !candidate.filePath.length) foundScratch=YES;
         check(foundScratch,@"named session restores untitled text without a backing file");
         original.scintillaView.string=@"newer unsaved text";

@@ -2,6 +2,33 @@
 
 The build combines 22 reviewed upstream PRs with 11 new focused PRs. It remains a native AppKit/Objective-C++ application using Scintilla and Lexilla. The work extends Nextpad instead of replacing its working native editor shell or porting the Windows UI.
 
+## File-open correction — 2026-10-20
+
+The first installed integration build opened an empty window when a file was
+double-clicked in Finder or passed to `open`. Activating the main window called
+`+[FindWindow existingWindow]`, whose declaration and caller were present but
+whose implementation had been lost while combining the search and multi-window
+PRs. The resulting exception interrupted `applicationDidFinishLaunching:` before
+pending file requests were processed. This was a defect in the combined build;
+the accessor is already implemented in included PR #391.
+
+Restored that accessor and added four native checks covering its non-creating
+behavior and Find-dialog retargeting between document windows. Added a separate
+Launch Services runner that executes the production `main` and real AppDelegate
+with isolated settings, observes startup exceptions, and compares SHA-256 hashes
+of the actual Scintilla buffer with fixture bytes. The old build failed this
+runner with the same exception. The corrected build passed cold CSV open,
+duplicate-file tab reuse, warm multi-file opening with Unicode filenames, and a
+read-only check of the reported Downloads CSV (5,697 bytes). The supplied file was
+unchanged. Native validation now passes **87 checks, 0 failures**.
+
+The previous installation smoke check verified process launch and associations,
+but did not inspect loaded document contents. The new runner covers that gap;
+its report contains hashes and paths rather than document contents. Run it with
+`python3 tests/run_file_open.py [optional-UTF8-file]` after building. The corrected
+package uses build number `2026.10.20.1` and retains the integration bundle ID,
+settings profile and file associations.
+
 ## Build and source
 
 - Package: `Nextpad++-Integration-universal.zip`, containing **Nextpad++ Integration.app**.
@@ -80,7 +107,7 @@ The three draft stacks were included after integration validation: #389 after #3
 
 ## Validation
 
-- **83 native AppKit checks pass.** They construct real editors/windows/panels, use Scintilla, save/reopen temporary files, exercise accessibility actions and launch a second copy of the actual CLI binary.
+- **87 native AppKit checks pass.** They construct real editors/windows/panels, use Scintilla, save/reopen temporary files, exercise accessibility actions and launch a second copy of the actual CLI binary.
 - **6/6 search suites pass:** editor regex, Boost backend, shared buffer search, file-search core and both standalone regex harnesses. These cover cancellation, legacy encodings, replacement round trips, invalid/complex regexes and concurrent searching, alongside new file-filter tree tests.
 - **37 XML resources parse:** English localization, both models and all 34 completion dictionaries.
 - **Universal binary and code signature verified** during packaging.
@@ -123,6 +150,7 @@ cmake --build build -j 6
 cmake --build build --target npp_tests -j 6
 ctest --test-dir build --output-on-failure
 python3 tests/run_native.py
+python3 tests/run_file_open.py
 python3 tools/package-integration.py --output ../release
 ```
 

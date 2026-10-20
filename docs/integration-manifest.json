@@ -424,5 +424,17 @@
       ],
       "description": "JSTool on Linux; separate platform/repository."
     }
+  ],
+  "integrationCorrections": [
+    {
+      "date": "2026-10-20",
+      "description": "Restore +[FindWindow existingWindow], lost while combining search and multi-window PRs; prevent window-activation exception from interrupting startup and dropping file-open requests.",
+      "upstreamSourcePR": 391,
+      "validation": {
+        "nativeChecks": 87,
+        "fileOpenChecks": 4,
+        "test": "tests/run_file_open.py"
+      }
+    }
   ]
 }
